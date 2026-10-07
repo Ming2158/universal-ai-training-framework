@@ -1,0 +1,27 @@
+# Example only; paths and training components become usable as V1 is implemented.
+task:
+  type: image_classification
+
+dataset:
+  format: image_folder
+  train_dir: datasets/example/train
+  validation_dir: datasets/example/validation
+  annotations_csv: null
+  image_dir: null
+
+model:
+  name: resnet18
+  pretrained: false
+
+training:
+  seed: 42
+  epochs: 10
+  batch_size: 32
+  learning_rate: 0.001
+  num_workers: 0
+
+evaluation:
+  primary_metric: accuracy
+
+output:
+  directory: outputs
