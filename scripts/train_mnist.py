@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from uatf.data import create_data_loaders
+from uatf.evaluation import evaluate_training_run
 
 
 class SimpleCNN(nn.Module):
@@ -216,6 +217,7 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = args.output_dir / "best_model.pth"
     best_validation_accuracy = -1.0
+    history: list[dict[str, float]] = []
 
     for epoch in range(1, args.epochs + 1):
         training_loss = train_one_epoch(
@@ -229,6 +231,14 @@ def main() -> int:
         print(f"训练损失：{training_loss:.4f}")
         print(f"验证损失：{validation_loss:.4f}")
         print(f"验证准确率：{validation_accuracy * 100:.2f}%")
+        history.append(
+            {
+                "epoch": float(epoch),
+                "train_loss": training_loss,
+                "val_loss": validation_loss,
+                "val_accuracy": validation_accuracy,
+            }
+        )
 
         if validation_accuracy > best_validation_accuracy:
             best_validation_accuracy = validation_accuracy
@@ -243,24 +253,38 @@ def main() -> int:
                 checkpoint_path,
             )
             print(f"  -> 验证准确率刷新最佳，已保存模型：{checkpoint_path}")
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "class_names": [str(digit) for digit in range(10)],
+                "validation_loss": validation_loss,
+                "validation_accuracy": validation_accuracy,
+            },
+            args.output_dir / "last_model.pth",
+        )
 
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=device,
-        weights_only=True,
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    loaded_validation_loss, loaded_validation_accuracy = validate(
-        model, validation_loader, loss_function, device
+    result = evaluate_training_run(
+        model,
+        validation_loader,
+        args.output_dir,
+        task="classification",
+        class_names=[str(digit) for digit in range(10)],
+        device=device,
+        loss_function=loss_function,
+        history=history,
     )
 
     print("\n========== 最佳模型检查 ==========")
     print("检查点重载：成功")
-    print(f"最佳模型来自第 {checkpoint['epoch']}/{args.epochs} 轮")
-    print(f"重载后验证损失：{loaded_validation_loss:.4f}")
-    print(f"重载后验证准确率：{loaded_validation_accuracy * 100:.2f}%")
+    print(f"验证准确率：{result.metrics['accuracy'] * 100:.2f}%")
+    print(f"宏平均 Precision：{result.metrics['macro_precision']:.4f}")
+    print(f"宏平均 Recall：{result.metrics['macro_recall']:.4f}")
+    print(f"宏平均 F1：{result.metrics['macro_f1']:.4f}")
     print(f"模型文件位置：{checkpoint_path}")
+    print(f"指标文件位置：{args.output_dir / 'metrics.json'}")
+    print(f"预测文件位置：{args.output_dir / 'predictions.csv'}")
+    print(f"图表目录：{args.output_dir / 'plots'}")
     return 0
 
 
