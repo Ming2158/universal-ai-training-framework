@@ -10,8 +10,9 @@ dataset:
   image_dir: null
 
 model:
-  name: resnet18
+  name: resnet50
   pretrained: false
+  num_classes: 14
 
 training:
   seed: 42
