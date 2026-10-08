@@ -7,8 +7,10 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+
+from uatf.data import create_data_loaders
 
 
 class SimpleCNN(nn.Module):
@@ -114,27 +116,14 @@ def make_loaders(
             f"无法下载 MNIST 数据到 {data_dir}。请检查网络连接后重新运行。"
         ) from error
 
-    validation_size = len(full_dataset) // 10
-    training_size = len(full_dataset) - validation_size
-    split_generator = torch.Generator().manual_seed(seed)
-    training_dataset, validation_dataset = random_split(
+    training_loader, validation_loader, _ = create_data_loaders(
         full_dataset,
-        [training_size, validation_size],
-        generator=split_generator,
-    )
-
-    training_loader = DataLoader(
-        training_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        validation_fraction=0.1,
+        seed=seed,
         num_workers=0,
     )
-    validation_loader = DataLoader(
-        validation_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-    )
+    assert validation_loader is not None
     return training_loader, validation_loader
 
 
