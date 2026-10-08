@@ -1,5 +1,7 @@
 # Universal AI Training Framework
 
+[English](README.md) | [简体中文](README_zh.md)
+
 UATF 1.0.0 is a local PyTorch framework for training and evaluating image classification models. It supports single-label and multi-label classification through the same dataset, model, training, and evaluation pipeline.
 
 ## Supported Features
