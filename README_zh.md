@@ -1,3 +1,5 @@
+<p align="center"><img src="UATF_logo.png" alt="UATF logo" width="360"></p>
+
 # 通用 AI 训练框架（UATF）
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -57,6 +59,8 @@ CSV 中的图像路径相对于配置的图像目录。更多示例和校验规�
 
 ## 使用方法
 
+在 Windows 上，双击仓库根目录中的 `启动UATF.bat` 即可打开本地界面。首次运行会创建 `venv` 环境并安装 CPU 版依赖；需要 Python 3.10、3.11 或 3.12，以及可用的网络连接。界面会自动在浏览器中打开。关闭启动器窗口即可停止 UATF。
+
 示例配置默认从 `datasets/example/` 读取多标签数据集，其中包含 `annotations.csv` 和 `images/`：
 
 ```powershell
@@ -99,6 +103,7 @@ CSV 中的图像路径相对于配置的图像目录。更多示例和校验规�
 
 ```text
 app/app.py                 Gradio 用户界面
+启动UATF.bat               Windows 双击启动器
 configs/                   默认和示例 YAML 配置
 datasets/                  可选的本地数据集；Git 会忽略数据文件
 docs/                      架构、故障排查和各阶段说明

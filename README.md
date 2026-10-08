@@ -1,3 +1,5 @@
+<p align="center"><img src="UATF_logo.png" alt="UATF logo" width="360"></p>
+
 # Universal AI Training Framework
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -57,6 +59,8 @@ Image paths in CSV files are relative to the configured image directory. More ex
 
 ## Usage
 
+On Windows, double-click `启动UATF.bat` in the repository root to start the local UI. On first launch it creates a `venv` environment and installs CPU dependencies; Python 3.10, 3.11, or 3.12 and an internet connection are required for setup. The browser opens automatically. Close the launcher window to stop UATF.
+
 The example config expects a multi-label dataset at `datasets/example/` with `annotations.csv` and `images/`:
 
 ```powershell
@@ -99,6 +103,7 @@ The CUDA smoke test reports a clear failure when CUDA is unavailable. Unit tests
 
 ```text
 app/app.py                 Gradio UI
+启动UATF.bat               Windows double-click launcher
 configs/                   Default and example YAML configs
 datasets/                  Optional local datasets; data is ignored by Git
 docs/                      Architecture, troubleshooting, and phase guides
