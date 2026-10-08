@@ -172,6 +172,45 @@ def test_invalid_data_shapes_and_non_finite_loss_are_clear(tmp_path: Path) -> No
         non_finite_trainer.train_epoch(loader)
 
 
+def test_checkpoint_errors_include_paths_and_state_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = nn.Linear(2, 2)
+    trainer = Trainer(
+        model,
+        nn.CrossEntropyLoss(),
+        torch.optim.SGD(model.parameters(), lr=0.1),
+        device="cpu",
+        checkpoint_dir=tmp_path,
+    )
+    checkpoint_path = tmp_path / "checkpoints" / "broken.pth"
+
+    def fail_save(checkpoint: object, path: Path) -> None:
+        raise RuntimeError("simulated disk failure")
+
+    monkeypatch.setattr(torch, "save", fail_save)
+    with pytest.raises(OSError, match="Could not save training checkpoint.*simulated disk failure"):
+        trainer.save_checkpoint(checkpoint_path)
+    assert not checkpoint_path.with_name("broken.pth.tmp").exists()
+
+    malformed_checkpoint = tmp_path / "malformed.pth"
+    monkeypatch.undo()
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": [],
+            "epoch": 1,
+            "metrics": {},
+            "scheduler_state_dict": None,
+            "early_stopping_state": None,
+        },
+        malformed_checkpoint,
+    )
+    with pytest.raises(ValueError, match="Invalid optimizer state.*malformed.pth"):
+        trainer.load_checkpoint(malformed_checkpoint)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_z_cuda_amp_training_after_fp32_integration(tmp_path: Path) -> None:
     train_loader, validation_loader = make_loaders()

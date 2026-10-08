@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import pickle
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -14,6 +16,8 @@ import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+
+logger = logging.getLogger(__name__)
 
 Metric = Callable[[Tensor, Tensor], float | Tensor]
 BatchLoader = Iterable[tuple[Tensor, Tensor]]
@@ -389,7 +393,7 @@ class Trainer:
             self._epoch = epoch
             self.start_epoch = epoch + 1
             history.append(record)
-            self._print_epoch(record, epochs)
+            self._log_epoch(record, epochs)
             if improved:
                 self.save_checkpoint(
                     self.checkpoint_dir / "best_model.pth",
@@ -402,7 +406,7 @@ class Trainer:
                 metrics=record,
             )
             if should_stop:
-                print(
+                logger.info(
                     f"Early stopping: {self.monitor} did not improve for "
                     f"{self.early_stopping.patience} epochs."
                 )
@@ -416,7 +420,7 @@ class Trainer:
         return value < self._best_metric if self.mode == "min" else value > self._best_metric
 
     @staticmethod
-    def _print_epoch(record: Mapping[str, float], total_epochs: int) -> None:
+    def _log_epoch(record: Mapping[str, float], total_epochs: int) -> None:
         epoch_fields = [f"Epoch {int(record['epoch'])}/{total_epochs}"]
         for key in ("train_loss", "val_loss"):
             epoch_fields.append(f"{key}={record[key]:.4f}")
@@ -428,7 +432,7 @@ class Trainer:
         epoch_fields.extend(f"{key}={record[key]:.4f}" for key in metric_names)
         epoch_fields.append(f"lr={record['learning_rate']:.6g}")
         epoch_fields.append(f"time={record['time_seconds']:.2f}s")
-        print(" | ".join(epoch_fields))
+        logger.info(" | ".join(epoch_fields))
 
     def save_checkpoint(
         self,
@@ -439,7 +443,12 @@ class Trainer:
     ) -> Path:
         """Save model and training state; defaults to ``last_model.pth``."""
         checkpoint_path = Path(path) if path is not None else self.checkpoint_dir / "last_model.pth"
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise OSError(
+                f"Could not prepare checkpoint directory {checkpoint_path.parent}: {error}"
+            ) from error
         loader_generator = getattr(self._train_loader, "generator", None)
         checkpoint: dict[str, Any] = {
             "format_version": 1,
@@ -462,8 +471,15 @@ class Trainer:
             ),
         }
         temporary_path = checkpoint_path.with_name(f"{checkpoint_path.name}.tmp")
-        torch.save(checkpoint, temporary_path)
-        temporary_path.replace(checkpoint_path)
+        try:
+            torch.save(checkpoint, temporary_path)
+            temporary_path.replace(checkpoint_path)
+        except (OSError, RuntimeError, ValueError) as error:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove incomplete checkpoint file %s", temporary_path)
+            raise OSError(f"Could not save training checkpoint to {checkpoint_path}: {error}") from error
         return checkpoint_path
 
     def load_checkpoint(self, path: str | Path, *, restore_rng: bool = True) -> dict[str, Any]:
@@ -477,7 +493,7 @@ class Trainer:
             )
         except FileNotFoundError as error:
             raise FileNotFoundError(f"Training checkpoint does not exist: {checkpoint_path}") from error
-        except (OSError, RuntimeError, ValueError) as error:
+        except (EOFError, OSError, pickle.UnpicklingError, RuntimeError, ValueError) as error:
             raise ValueError(f"Could not read training checkpoint {checkpoint_path}: {error}") from error
 
         if not isinstance(checkpoint, Mapping):
@@ -491,14 +507,33 @@ class Trainer:
         saved_scheduler = checkpoint.get("scheduler_state_dict")
         if (saved_scheduler is None) != (self.scheduler is None):
             raise ValueError("Checkpoint scheduler settings do not match this Trainer.")
+        if not isinstance(checkpoint["optimizer_state_dict"], Mapping):
+            raise ValueError(f"Invalid optimizer state in training checkpoint {checkpoint_path}.")
+        if saved_scheduler is not None and not isinstance(saved_scheduler, Mapping):
+            raise ValueError(f"Invalid scheduler state in training checkpoint {checkpoint_path}.")
+        if (
+            isinstance(checkpoint["epoch"], bool)
+            or not isinstance(checkpoint["epoch"], int)
+            or checkpoint["epoch"] < 0
+        ):
+            raise ValueError(f"Invalid epoch value in training checkpoint {checkpoint_path}.")
+        if not isinstance(checkpoint["metrics"], Mapping):
+            raise ValueError(f"Invalid metrics in training checkpoint {checkpoint_path}.")
         early_state = checkpoint.get("early_stopping_state")
         if (early_state is None) != (self.early_stopping is None):
             raise ValueError("Checkpoint early stopping settings do not match this Trainer.")
+        if early_state is not None and not isinstance(early_state, Mapping):
+            raise ValueError(f"Invalid early stopping state in training checkpoint {checkpoint_path}.")
+        scaler_state = checkpoint.get("scaler_state_dict")
+        if scaler_state is not None and not isinstance(scaler_state, Mapping):
+            raise ValueError(f"Invalid scaler state in training checkpoint {checkpoint_path}.")
 
         saved_model_state = checkpoint["model_state_dict"]
         current_model_state = self.model.state_dict()
         if not isinstance(saved_model_state, Mapping):
             raise ValueError(f"Invalid model state in training checkpoint {checkpoint_path}.")
+        if any(not isinstance(value, Tensor) for value in saved_model_state.values()):
+            raise ValueError(f"Invalid model tensor in training checkpoint {checkpoint_path}.")
         mismatched_shapes = [
             name
             for name in current_model_state.keys() & saved_model_state.keys()
@@ -527,15 +562,19 @@ class Trainer:
                 "the model architecture must match the saved model."
             ) from error
 
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if self.scheduler is not None:
-            self.scheduler.load_state_dict(saved_scheduler)
+        try:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if self.scheduler is not None:
+                self.scheduler.load_state_dict(saved_scheduler)
 
-        scaler_state = checkpoint.get("scaler_state_dict")
-        if scaler_state:
-            self.scaler.load_state_dict(scaler_state)
-        if self.early_stopping is not None:
-            self.early_stopping.load_state_dict(early_state)
+            if scaler_state:
+                self.scaler.load_state_dict(scaler_state)
+            if self.early_stopping is not None:
+                self.early_stopping.load_state_dict(early_state)
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Invalid training state in checkpoint {checkpoint_path}: {error}"
+            ) from error
 
         self._epoch = int(checkpoint["epoch"])
         self.start_epoch = self._epoch + 1

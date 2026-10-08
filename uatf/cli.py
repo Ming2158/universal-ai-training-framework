@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import platform
 import random
 import sys
-import traceback
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 import torch
 import yaml
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
+from uatf import __version__
 from uatf.config import load_config, merge_config, validate_config
 from uatf.data import (
     CsvImageClassificationDataset,
@@ -28,25 +28,11 @@ from uatf.data import (
     create_data_loaders,
 )
 from uatf.evaluation import evaluate_training_run
+from uatf.logging_utils import configure_logging, shutdown_logging
 from uatf.models import build_model_from_config, get_loss
 from uatf.training import Trainer, build_early_stopping, build_scheduler
 
-
-class _Tee:
-    """Send command output to both the terminal and the experiment log."""
-
-    def __init__(self, terminal: TextIO, log_file: TextIO) -> None:
-        self.terminal = terminal
-        self.log_file = log_file
-
-    def write(self, value: str) -> int:
-        self.terminal.write(value)
-        self.log_file.write(value)
-        return len(value)
-
-    def flush(self) -> None:
-        self.terminal.flush()
-        self.log_file.flush()
+logger = logging.getLogger("uatf.cli")
 
 
 def _path(value: str | None) -> Path | None:
@@ -78,6 +64,8 @@ def _image_loaders(
                 train_path, validation_path = root / "train", root / "val"
             elif (root / "train").is_dir():
                 train_path = root / "train"
+            else:
+                train_path = root
 
         if train_path is None:
             raise ValueError("Image-folder data requires dataset.path or dataset.train_dir.")
@@ -277,115 +265,120 @@ def _run(configuration: dict[str, Any], source_config: Path) -> Path:
         yaml.safe_dump(configuration, destination, sort_keys=False, allow_unicode=True)
 
     log_path = experiment_dir / "logs" / "train.log"
-    original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
-        with log_path.open("w", encoding="utf-8") as log_file:
-            stdout_tee, stderr_tee = _Tee(original_stdout, log_file), _Tee(original_stderr, log_file)
-            with redirect_stdout(stdout_tee), redirect_stderr(stderr_tee):
-                started_at = datetime.now(timezone.utc).isoformat()
-                print(f"Experiment: {experiment_dir.name}")
-                print(f"Configuration: {experiment_dir / 'config.yaml'}")
-                print(f"Task: {task} | Model: {model_config['name']} | Device: {training_config['device']}")
-                print(
-                    f"Dataset: {dataset_metadata['train_samples']} train / "
-                    f"{dataset_metadata['validation_samples']} validation examples"
-                )
+        configure_logging(log_path)
+        started_at = datetime.now(timezone.utc).isoformat()
+        logger.info("Experiment: %s", experiment_dir.name)
+        logger.info("Configuration: %s", experiment_dir / "config.yaml")
+        logger.info(
+            "Task: %s | Model: %s | Requested device: %s",
+            task,
+            model_config["name"],
+            training_config["device"],
+        )
+        logger.info(
+            "Dataset: %s train / %s validation examples",
+            dataset_metadata["train_samples"],
+            dataset_metadata["validation_samples"],
+        )
+        logger.debug("Effective configuration:\n%s", yaml.safe_dump(configuration, sort_keys=False))
 
-                model = build_model_from_config(configuration)
-                loss_function = get_loss(task)
-                optimizer = torch.optim.Adam(
-                    model.parameters(), lr=training_config["learning_rate"]
-                )
-                metric_functions = (
-                    {"micro_f1": _multilabel_micro_f1(configuration["evaluation"]["threshold"])}
-                    if task == "multi_label"
-                    else {"accuracy": _classification_accuracy}
-                )
-                early_stopping_config = training_config["early_stopping"]
-                if early_stopping_config.get("enabled"):
-                    early_stopping_config.setdefault("mode", training_config["monitor_mode"])
-                trainer = Trainer(
-                    model,
-                    loss_function,
-                    optimizer,
-                    scheduler=build_scheduler(optimizer, training_config["scheduler"]),
-                    metrics=metric_functions,
-                    device=training_config["device"],
-                    checkpoint_dir=experiment_dir,
-                    monitor=training_config["monitor"],
-                    mode=training_config["monitor_mode"],
-                    early_stopping=build_early_stopping(early_stopping_config),
-                    amp=training_config["amp"]["enabled"],
-                )
-                history = trainer.fit(
-                    train_loader,
-                    validation_loader,
-                    epochs=training_config["epochs"],
-                )
-                result = evaluate_training_run(
-                    trainer.model,
-                    validation_loader,
-                    experiment_dir,
-                    task=task,
-                    class_names=class_names,
-                    threshold=configuration["evaluation"]["threshold"],
-                    device=trainer.device,
-                    loss_function=loss_function,
-                    history=history,
-                )
-                completed_at = datetime.now(timezone.utc).isoformat()
-                primary_metric = configuration["evaluation"]["primary_metric"]
-                device_name = (
-                    torch.cuda.get_device_name(trainer.device)
-                    if trainer.device.type == "cuda"
-                    else "CPU"
-                )
-                report = {
-                    "experiment": {
-                        "name": experiment_dir.name,
-                        "started_at_utc": started_at,
-                        "completed_at_utc": completed_at,
-                        "source_config": str(source_config),
-                    },
-                    "environment": {
-                        "python": platform.python_version(),
-                        "pytorch": str(torch.__version__),
-                        "device": str(trainer.device),
-                        "device_name": device_name,
-                    },
-                    "task": task,
-                    "model": {
-                        "name": model_config["name"],
-                        "pretrained": model_config["pretrained"],
-                        "num_classes": model_config["num_classes"],
-                    },
-                    "dataset": dataset_metadata,
-                    "training": {
-                        "epochs_requested": training_config["epochs"],
-                        "epochs_completed": len(history),
-                        "history": history,
-                    },
-                    "evaluation": {
-                        "primary_metric": primary_metric,
-                        "primary_value": result.metrics.get(primary_metric),
-                        "loss": result.loss,
-                        "sample_count": result.metrics["sample_count"],
-                        "class_names": class_names,
-                        "metrics": result.metrics,
-                    },
-                    "checkpoint": {
-                        "best": "best_model.pth",
-                        "last": "last_model.pth",
-                    },
-                }
-                _write_json(experiment_dir / "metrics.json", report)
-                print(f"Best checkpoint: {experiment_dir / 'best_model.pth'}")
-                print(f"Metrics: {experiment_dir / 'metrics.json'}")
-                print(f"Experiment log: {log_path}")
+        model = build_model_from_config(configuration)
+        loss_function = get_loss(task)
+        optimizer = torch.optim.Adam(model.parameters(), lr=training_config["learning_rate"])
+        metric_functions = (
+            {"micro_f1": _multilabel_micro_f1(configuration["evaluation"]["threshold"])}
+            if task == "multi_label"
+            else {"accuracy": _classification_accuracy}
+        )
+        early_stopping_config = training_config["early_stopping"]
+        if early_stopping_config.get("enabled"):
+            early_stopping_config.setdefault("mode", training_config["monitor_mode"])
+        trainer = Trainer(
+            model,
+            loss_function,
+            optimizer,
+            scheduler=build_scheduler(optimizer, training_config["scheduler"]),
+            metrics=metric_functions,
+            device=training_config["device"],
+            checkpoint_dir=experiment_dir,
+            monitor=training_config["monitor"],
+            mode=training_config["monitor_mode"],
+            early_stopping=build_early_stopping(early_stopping_config),
+            amp=training_config["amp"]["enabled"],
+        )
+        device_name = (
+            torch.cuda.get_device_name(trainer.device)
+            if trainer.device.type == "cuda"
+            else "CPU"
+        )
+        logger.info("Resolved device: %s (%s)", trainer.device, device_name)
+        if training_config["device"] == "auto" and trainer.device.type == "cpu":
+            logger.warning("CUDA is unavailable; this experiment is running on CPU.")
+
+        history = trainer.fit(
+            train_loader,
+            validation_loader,
+            epochs=training_config["epochs"],
+        )
+        result = evaluate_training_run(
+            trainer.model,
+            validation_loader,
+            experiment_dir,
+            task=task,
+            class_names=class_names,
+            threshold=configuration["evaluation"]["threshold"],
+            device=trainer.device,
+            loss_function=loss_function,
+            history=history,
+        )
+        completed_at = datetime.now(timezone.utc).isoformat()
+        primary_metric = configuration["evaluation"]["primary_metric"]
+        report = {
+            "experiment": {
+                "name": experiment_dir.name,
+                "started_at_utc": started_at,
+                "completed_at_utc": completed_at,
+                "source_config": str(source_config),
+            },
+            "environment": {
+                "uatf": __version__,
+                "python": platform.python_version(),
+                "pytorch": str(torch.__version__),
+                "device": str(trainer.device),
+                "device_name": device_name,
+            },
+            "task": task,
+            "model": {
+                "name": model_config["name"],
+                "pretrained": model_config["pretrained"],
+                "num_classes": model_config["num_classes"],
+            },
+            "dataset": dataset_metadata,
+            "training": {
+                "epochs_requested": training_config["epochs"],
+                "epochs_completed": len(history),
+                "history": history,
+            },
+            "evaluation": {
+                "primary_metric": primary_metric,
+                "primary_value": result.metrics.get(primary_metric),
+                "loss": result.loss,
+                "sample_count": result.metrics["sample_count"],
+                "class_names": class_names,
+                "metrics": result.metrics,
+            },
+            "checkpoint": {
+                "best": "best_model.pth",
+                "last": "last_model.pth",
+            },
+        }
+        _write_json(experiment_dir / "metrics.json", report)
+        logger.info("Best checkpoint: %s", experiment_dir / "best_model.pth")
+        logger.info("Metrics: %s", experiment_dir / "metrics.json")
+        logger.info("Experiment log: %s", log_path)
     except Exception:
-        with log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write("\nTraining failed:\n")
-            log_file.write(traceback.format_exc())
+        logger.exception("Training failed for experiment %s", experiment_dir.name)
         raise
     return experiment_dir
 
@@ -434,11 +427,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         validated = validate_config(configuration)
         experiment_dir = _run(validated, args.config.expanduser().resolve())
-        print(f"Training completed: {experiment_dir}")
+        logger.info("Training completed: %s", experiment_dir)
         return 0
     except (FileNotFoundError, FileExistsError, ValueError, OSError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
+    finally:
+        shutdown_logging()
 
 
 if __name__ == "__main__":
