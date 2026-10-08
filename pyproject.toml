@@ -14,7 +14,7 @@ dependencies = [
     "Pillow>=10",
     "PyYAML>=6",
     "matplotlib>=3.8",
-    "streamlit>=1.35",
+    "gradio>=4.44",
 ]
 
 [project.optional-dependencies]

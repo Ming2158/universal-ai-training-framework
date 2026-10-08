@@ -1,18 +1,16 @@
-# Example only; paths and training components become usable as V1 is implemented.
+# Reference defaults. The CLI uses the matching DEFAULT_CONFIG in uatf.config.
 task:
-  type: image_classification
+  type: classification
 
 dataset:
-  format: image_folder
-  train_dir: datasets/example/train
-  validation_dir: datasets/example/validation
-  annotations_csv: null
-  image_dir: null
+  validation_fraction: 0.2
+  image_size: 224
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
 
 model:
   name: resnet50
   pretrained: false
-  num_classes: 14
 
 training:
   seed: 42
@@ -20,6 +18,8 @@ training:
   batch_size: 32
   learning_rate: 0.001
   num_workers: 0
+  device: auto
+  monitor: val_loss
   amp:
     enabled: false
   scheduler:
@@ -34,6 +34,7 @@ training:
 
 evaluation:
   primary_metric: accuracy
+  threshold: 0.5
 
 output:
   directory: outputs

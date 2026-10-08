@@ -1,0 +1,21 @@
+# Multi-label CSV layout:
+# datasets/example/annotations.csv and datasets/example/images/<image files>
+# CSV columns: image_path, label_a, label_b, ...; label cells must be 0 or 1.
+dataset:
+  type: multilabel
+  path: ./datasets/example
+
+model:
+  name: resnet50
+  pretrained: false
+
+training:
+  epochs: 20
+  batch_size: 16
+  learning_rate: 0.0001
+
+evaluation:
+  primary_metric: macro_f1
+
+output:
+  directory: outputs

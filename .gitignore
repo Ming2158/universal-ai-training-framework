@@ -3,11 +3,21 @@ __pycache__/
 *.py[cod]
 *.pyd
 .venv/
+.venv-old*/
 venv/
 env/
+ENV/
 .pytest_cache/
+.tox/
+.nox/
 .coverage
+.coverage.*
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
 
 # Local configuration and editor files
 .env
@@ -15,16 +25,50 @@ htmlcov/
 !.env.example
 .idea/
 .vscode/
+.vs/
+.spyderproject
+.spyproject
+*.suo
+*.user
 
-# Local datasets and generated training artifacts
+# Local datasets
+/data/*
+!/data/.gitkeep
+/dataset/*
+!/dataset/.gitkeep
 /datasets/*
 !/datasets/.gitkeep
+
+# Generated training artifacts and model weights
 /outputs/*
 !/outputs/.gitkeep
+/checkpoints/
 *.pt
 *.pth
 *.ckpt
+*.safetensors
+
+# Logs and temporary files
+/logs/
+*.log
+*.log.*
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+/tmp/
 
 # OS files
 .DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+__MACOSX/
 Thumbs.db
+Desktop.ini
+ehthumbs.db
