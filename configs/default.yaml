@@ -20,6 +20,17 @@ training:
   batch_size: 32
   learning_rate: 0.001
   num_workers: 0
+  amp:
+    enabled: false
+  scheduler:
+    enabled: false
+    name: step_lr
+    step_size: 5
+    gamma: 0.1
+  early_stopping:
+    enabled: false
+    patience: 5
+    min_delta: 0.0
 
 evaluation:
   primary_metric: accuracy
