@@ -8,6 +8,8 @@ For first-time setup, see the [UATF usage guide](使用文档.md) for the GUI an
 
 UATF 1.0.0 is a local PyTorch framework for training and evaluating image classification models. It supports single-label and multi-label classification through the same dataset, model, training, and evaluation pipeline.
 
+Changes after the `v1.0.0` tag are unreleased work. The interactive CLI wizard is listed under [Unreleased](CHANGELOG.md).
+
 ## Supported Features
 
 - Folder and CSV datasets with image validation and deterministic train/validation splits.
@@ -128,6 +130,7 @@ uatf/evaluation/           Metrics, reports, predictions, and plots
 uatf/config.py             YAML loading, merging, and validation
 uatf/logging_utils.py      Console and experiment-file logging
 uatf/cli.py                Config-driven training entry point
+uatf/cli_wizard.py         Bilingual interactive training wizard
 ```
 
 ## Documentation
@@ -140,8 +143,9 @@ uatf/cli.py                Config-driven training entry point
 - [Evaluation](docs/phase7-evaluation-system.md)
 - [Configuration and CLI](docs/phase8-configuration-system.md)
 - [Gradio UI](docs/phase9-gradio-ui.md)
-- [Engineering Review](docs/engineering-review.md)
+- [Historical Engineering Review](docs/engineering-review.md)
 - [Changelog](CHANGELOG.md)
+- [Versioning and Release Rules](docs/versioning.md)
 - [UATF 1.0.0 Release Notes](docs/release-notes-v1.0.0.md)
 
 ## Scope and Limitations

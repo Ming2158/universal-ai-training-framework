@@ -8,6 +8,8 @@
 
 UATF 1.0.0 是一个基于 PyTorch 的本地框架，用于训练和评估图像分类模型。单标签与多标签分类共用同一套数据集、模型、训练和评估流程。
 
+`v1.0.0` 标签之后的改动尚未发布。交互式 CLI 向导记录在[更新日志的 Unreleased 部分](CHANGELOG.md)。
+
 ## 支持功能
 
 - 支持文件夹和 CSV 数据集，包含图像校验和可复现的训练/验证集划分。
@@ -141,8 +143,9 @@ uatf/cli_wizard.py         双语终端训练向导
 - [评估系统](docs/phase7-evaluation-system.md)
 - [配置与 CLI](docs/phase8-configuration-system.md)
 - [Gradio 界面](docs/phase9-gradio-ui.md)
-- [工程审查](docs/engineering-review.md)
+- [历史工程审查](docs/engineering-review.md)
 - [更新日志](CHANGELOG.md)
+- [版本管理与发布规则](docs/versioning.md)
 - [UATF 1.0.0 发布说明](docs/release-notes-v1.0.0.md)
 
 ## 范围与局限

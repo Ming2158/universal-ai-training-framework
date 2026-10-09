@@ -1,5 +1,7 @@
 # UATF Engineering Review
 
+> Historical review of revision `039df8b`. Repository, branch, test, and release statements below describe that snapshot, not the current project state.
+
 Review date: 2026-10-08  
 Reviewed revision: `039df8b` (`feat: add Gradio training interface`)  
 Working tree at review start: clean

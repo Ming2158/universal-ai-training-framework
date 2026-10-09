@@ -2,6 +2,17 @@
 
 Notable changes for each release are recorded here.
 
+## [Unreleased]
+
+### Added
+
+- A bilingual interactive CLI wizard for choosing a task, dataset, model, and training settings.
+- A Windows launcher and a usage guide for GUI and CLI workflows.
+
+### Fixed
+
+- The interactive CLI wizard now works with legacy GBK Windows consoles.
+
 ## [1.0.0] - 2026-10-08
 
 ### Added
