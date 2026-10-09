@@ -18,10 +18,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 TEXT = {
     "zh": {
-        "welcome": "\n🎨 欢迎使用 UATF 训练向导！",
+        "welcome": "\n欢迎使用 UATF 训练向导！",
         "language": "选择界面语言：1) 简体中文  2) English",
         "language_changed": "界面语言已切换。",
-        "language_hint": "💡 在任意问题输入 :lang 可切换中英文。按 Ctrl+C 可退出。",
+        "language_hint": "在任意问题输入 :lang 可切换中英文。按 Ctrl+C 可退出。",
         "task": "第一步：选择训练任务",
         "format": "选择数据集格式",
         "multilabel_format_fixed": "多标签任务使用 CSV 标注格式：",
@@ -46,7 +46,7 @@ TEXT = {
         "zip_extract": "正在安全解压数据集…",
         "bad_zip": "无法读取这个 ZIP 文件，请确认文件完整且未加密。",
         "unsafe_zip": "ZIP 中包含不安全的路径或符号链接，已停止解压。",
-        "summary_title": "\n📋 训练设置确认",
+        "summary_title": "\n训练设置确认",
         "summary_task": "任务",
         "summary_format": "数据格式",
         "summary_dataset": "数据位置",
@@ -62,8 +62,8 @@ TEXT = {
         "confirm_invalid": "请输入 Y（开始）或 N（取消）。",
         "cancelled": "已取消，本次没有启动训练。",
         "config_saved": "配置已保存：{path}",
-        "starting": "\n🚀 正在启动训练…",
-        "completed": "\n✅ 训练完成！结果保存在：{path}",
+        "starting": "\n正在启动训练…",
+        "completed": "\n训练完成！结果保存在：{path}",
         "task_classification": "单标签分类（每张图片一个类别）",
         "task_multi_label": "多标签分类（每张图片可有多个标签）",
         "format_folder": "图片文件夹（类别分别放在子文件夹）",
@@ -87,10 +87,10 @@ TEXT = {
         "pretrained_no": "关闭",
     },
     "en": {
-        "welcome": "\n🎨 Welcome to the UATF training wizard!",
+        "welcome": "\nWelcome to the UATF training wizard!",
         "language": "Choose a language: 1) 简体中文  2) English",
         "language_changed": "Interface language changed.",
-        "language_hint": "💡 Type :lang at any prompt to switch languages. Press Ctrl+C to quit.",
+        "language_hint": "Type :lang at any prompt to switch languages. Press Ctrl+C to quit.",
         "task": "Step 1: Choose a training task",
         "format": "Choose a dataset format",
         "multilabel_format_fixed": "Multi-label tasks use CSV annotations:",
@@ -115,7 +115,7 @@ TEXT = {
         "zip_extract": "Safely extracting the dataset…",
         "bad_zip": "Could not read this ZIP file. Check that it is complete and not encrypted.",
         "unsafe_zip": "The ZIP contains an unsafe path or symbolic link. Extraction was stopped.",
-        "summary_title": "\n📋 Review training settings",
+        "summary_title": "\nReview training settings",
         "summary_task": "Task",
         "summary_format": "Dataset format",
         "summary_dataset": "Dataset location",
@@ -131,8 +131,8 @@ TEXT = {
         "confirm_invalid": "Enter Y to start or N to cancel.",
         "cancelled": "Cancelled. Training was not started.",
         "config_saved": "Configuration saved to: {path}",
-        "starting": "\n🚀 Starting training…",
-        "completed": "\n✅ Training complete! Results are in: {path}",
+        "starting": "\nStarting training…",
+        "completed": "\nTraining complete! Results are in: {path}",
         "task_classification": "Single-label classification (one class per image)",
         "task_multi_label": "Multi-label classification (multiple labels per image)",
         "format_folder": "Image folders (one subfolder per class)",
@@ -373,7 +373,7 @@ def run_wizard(language: str | None = None) -> tuple[dict[str, Any], Path, str] 
     if task == "multi_label":
         data_format = "csv_multilabel"
         ui.say("multilabel_format_fixed")
-        print(f"  • {ui.text('format_csv_multi')}")
+        print(f"  - {ui.text('format_csv_multi')}")
     else:
         data_format = ui.choose(
             "format",
