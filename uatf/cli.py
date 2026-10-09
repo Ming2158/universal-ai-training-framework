@@ -384,8 +384,16 @@ def _run(configuration: dict[str, Any], source_config: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="用 YAML 配置运行 UATF 图像分类训练。")
-    parser.add_argument("--config", required=True, type=Path, help="YAML 配置文件路径")
+    parser = argparse.ArgumentParser(
+        description="UATF 图像训练：使用交互向导，或通过 YAML 配置运行。"
+    )
+    parser.add_argument("--config", type=Path, help="YAML 配置文件路径")
+    parser.add_argument(
+        "-i", "--interactive", action="store_true", help="启动中英双语交互式训练向导"
+    )
+    parser.add_argument(
+        "--language", choices=("zh", "en"), help="向导语言：zh（简体中文）或 en（English）"
+    )
     parser.add_argument("--epochs", type=int, help="覆盖配置中的训练轮数")
     parser.add_argument("--batch-size", type=int, help="覆盖配置中的批次大小")
     parser.add_argument("--learning-rate", type=float, help="覆盖配置中的学习率")
@@ -396,41 +404,74 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    interactive = args.interactive or (args.config is None and sys.stdin.isatty())
+    if interactive and args.config is not None:
+        parser.error("交互向导与 YAML 配置模式不能同时使用。")
+    if interactive and any(
+        getattr(args, name) is not None
+        for name in ("epochs", "batch_size", "learning_rate", "seed", "device", "output_dir")
+    ):
+        parser.error("交互模式请在向导中设置参数；命令行覆盖参数需要配合 --config 使用。")
+    if not interactive and args.language is not None:
+        parser.error("--language 仅用于交互向导，请添加 --interactive。")
+    if not interactive and args.config is None:
+        parser.error("请提供 --config，或使用 --interactive 启动训练向导。")
+
+    selected_language: str | None = None
     try:
-        user_config = load_config(args.config)
-        configuration = dict(user_config)
-        cli_training: dict[str, Any] = {}
-        for argument, key in (
-            ("epochs", "epochs"),
-            ("batch_size", "batch_size"),
-            ("learning_rate", "learning_rate"),
-            ("seed", "seed"),
-            ("device", "device"),
-        ):
-            value = getattr(args, argument)
-            if value is not None:
-                cli_training[key] = value
-        if cli_training:
-            user_training = user_config.get("training", {})
-            configuration["training"] = (
-                merge_config(user_training, cli_training)
-                if isinstance(user_training, Mapping)
-                else user_training
-            )
-        if args.output_dir is not None:
-            user_output = user_config.get("output", {})
-            configuration["output"] = (
-                merge_config(user_output, {"directory": args.output_dir})
-                if isinstance(user_output, Mapping)
-                else user_output
-            )
-        validated = validate_config(configuration)
-        experiment_dir = _run(validated, args.config.expanduser().resolve())
-        logger.info("Training completed: %s", experiment_dir)
+        if interactive:
+            from uatf.cli_wizard import print_completed, run_wizard
+
+            wizard_result = run_wizard(args.language)
+            if wizard_result is None:
+                return 0
+            validated, source_config, selected_language = wizard_result
+        else:
+            assert args.config is not None
+            user_config = load_config(args.config)
+            configuration = dict(user_config)
+            cli_training: dict[str, Any] = {}
+            for argument, key in (
+                ("epochs", "epochs"),
+                ("batch_size", "batch_size"),
+                ("learning_rate", "learning_rate"),
+                ("seed", "seed"),
+                ("device", "device"),
+            ):
+                value = getattr(args, argument)
+                if value is not None:
+                    cli_training[key] = value
+            if cli_training:
+                user_training = user_config.get("training", {})
+                configuration["training"] = (
+                    merge_config(user_training, cli_training)
+                    if isinstance(user_training, Mapping)
+                    else user_training
+                )
+            if args.output_dir is not None:
+                user_output = user_config.get("output", {})
+                configuration["output"] = (
+                    merge_config(user_output, {"directory": args.output_dir})
+                    if isinstance(user_output, Mapping)
+                    else user_output
+                )
+            validated = validate_config(configuration)
+            source_config = args.config.expanduser().resolve()
+
+        experiment_dir = _run(validated, source_config)
+        if selected_language is not None:
+            print_completed(selected_language, experiment_dir)
+        else:
+            logger.info("Training completed: %s", experiment_dir)
         return 0
+    except KeyboardInterrupt:
+        print("\n已取消 / Cancelled.")
+        return 130
     except (FileNotFoundError, FileExistsError, ValueError, OSError, RuntimeError) as error:
-        print(f"Error: {error}", file=sys.stderr)
+        label = "错误" if selected_language == "zh" else "Error"
+        print(f"{label}: {error}", file=sys.stderr)
         return 2
     finally:
         shutdown_logging()

@@ -4,6 +4,8 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
+For first-time setup, see the [UATF usage guide](使用文档.md) for the GUI and CLI workflows.
+
 UATF 1.0.0 is a local PyTorch framework for training and evaluating image classification models. It supports single-label and multi-label classification through the same dataset, model, training, and evaluation pipeline.
 
 ## Supported Features
@@ -72,6 +74,14 @@ Override common settings without editing YAML:
 ```powershell
 .\.venv\Scripts\python.exe train.py --config configs/example.yaml --epochs 3 --batch-size 8 --device cpu
 ```
+
+For a guided terminal workflow, run:
+
+```powershell
+.\.venv\Scripts\python.exe train.py --interactive
+```
+
+After installing the project, `uatf --interactive` starts the same wizard; running `uatf` or `python train.py` in a terminal also opens it. If the project was already installed, run `python -m pip install -e .` once to create the new `uatf` command. The wizard supports Simplified Chinese and English; type `:lang` at any prompt to switch. It guides you through the task and dataset format, a local dataset folder, CSV file, or ZIP archive, model and pretrained weights, epochs, batch size, learning rate, and CPU/CUDA device. A settings summary is shown before training begins. ZIP uploads are extracted under `outputs/cli_uploads/`; wizard runs are saved under `outputs/cli_runs/`.
 
 Each run creates a new directory under `outputs/`, containing the effective `config.yaml`, `metrics.json`, `predictions.csv`, plots, `best_model.pth`, `last_model.pth`, and `logs/train.log`. Pretrained weights are disabled by default; enabling them may download weights from torchvision.
 

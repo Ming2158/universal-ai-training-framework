@@ -4,6 +4,8 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
+首次使用请查看[UATF 使用文档](使用文档.md)，了解 GUI 和 CLI 两种操作方式。
+
 UATF 1.0.0 是一个基于 PyTorch 的本地框架，用于训练和评估图像分类模型。单标签与多标签分类共用同一套数据集、模型、训练和评估流程。
 
 ## 支持功能
@@ -73,6 +75,14 @@ CSV 中的图像路径相对于配置的图像目录。更多示例和校验规�
 .\.venv\Scripts\python.exe train.py --config configs/example.yaml --epochs 3 --batch-size 8 --device cpu
 ```
 
+也可以使用纯终端交互向导创建训练任务：
+
+```powershell
+.\.venv\Scripts\python.exe train.py --interactive
+```
+
+安装项目后也可运行 `uatf --interactive`；在终端直接运行 `uatf` 或 `python train.py` 也会进入向导。若项目之前已安装，更新后执行一次 `python -m pip install -e .` 来生成新的 `uatf` 命令。向导支持简体中文和英文，在任意问题输入 `:lang` 即可切换。它会引导选择单标签/多标签任务、数据格式，输入本地数据集目录、CSV 文件或 ZIP 路径，选择模型、预训练权重、Epochs、Batch Size、Learning Rate 和 CPU/CUDA 设备，并在训练前展示设置摘要。分类文件夹 ZIP 的根目录应包含类别子目录；CSV ZIP 应包含 `annotations.csv`，图片放在 `images/` 或与 CSV 同级。向导把 ZIP 解压到 `outputs/cli_uploads/`，训练结果保存到 `outputs/cli_runs/`。
+
 每次运行都会在 `outputs/` 下创建新目录，包含最终生效的 `config.yaml`、`metrics.json`、`predictions.csv`、图表、`best_model.pth`、`last_model.pth` 和 `logs/train.log`。默认不启用预训练权重；启用后可能会从 torchvision 下载权重。
 
 从仓库根目录启动本地界面：
@@ -117,7 +127,8 @@ uatf/training/             Trainer、验证、检查点、恢复训练和 AMP
 uatf/evaluation/           指标、报告、预测和图表
 uatf/config.py             YAML 加载、合并和校验
 uatf/logging_utils.py      控制台和实验日志配置
-uatf/cli.py                基于配置的训练入口
+uatf/cli.py                交互式与基于配置的训练入口
+uatf/cli_wizard.py         双语终端训练向导
 ```
 
 ## 文档

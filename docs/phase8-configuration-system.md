@@ -31,6 +31,16 @@ python train.py --config configs/example.yaml --epochs 3 --batch-size 8 --device
 
 Values follow three levels: built-in defaults, YAML values, then provided CLI arguments. Current CLI overrides are `--epochs`, `--batch-size`, `--learning-rate`, `--seed`, `--device`, and `--output-dir`. `training.monitor` chooses the value used to save the best checkpoint; `evaluation.primary_metric` names the main metric in the final report.
 
+## Interactive terminal wizard
+
+You can create a run without writing YAML first:
+
+```powershell
+python train.py --interactive
+```
+
+The wizard supports Simplified Chinese and English. Type `:lang` at a prompt to switch languages. It asks for the task, dataset layout and local path (directory, CSV file, or ZIP archive), model, optional pretrained weights, epochs, batch size, learning rate, and device. It shows the resolved settings and asks before starting. ZIP files are safely extracted under `outputs/cli_uploads/`; the generated YAML is saved under `outputs/cli_configs/`, and experiments go to `outputs/cli_runs/`. Running `python train.py` with no arguments in a terminal also opens the wizard. An installed console script is available as `uatf --interactive`; run `python -m pip install -e .` after updating an existing installation to create it.
+
 ## Validation and outputs
 
 The config loader uses PyYAML's safe loader, recursively merges defaults, rejects unknown options, validates numeric ranges and task/dataset combinations, and checks the model registry before it reads the dataset. An unknown model reports the registered model names. For example, `batch_size: -1` and `model.name: abc` fail before a training run starts.

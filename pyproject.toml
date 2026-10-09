@@ -17,6 +17,9 @@ dependencies = [
     "gradio>=4.44",
 ]
 
+[project.scripts]
+uatf = "uatf.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.14"]
 
