@@ -2,12 +2,109 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from math import isfinite
 from typing import Any
 
 import torch
 from torch import Tensor
+
+from uatf.models.factory import normalize_task
+
+METRIC_REGISTRY: dict[str, tuple[str, ...]] = {
+    "classification": (
+        "accuracy",
+        "precision",
+        "recall",
+        "f1",
+        "macro_f1",
+        "macro_precision",
+        "macro_recall",
+        "micro_f1",
+        "micro_precision",
+        "micro_recall",
+    ),
+    "multi_label": (
+        "precision",
+        "recall",
+        "f1",
+        "macro_f1",
+        "macro_precision",
+        "macro_recall",
+        "micro_f1",
+        "micro_precision",
+        "micro_recall",
+        "macro_auc",
+        "micro_auc",
+    ),
+}
+
+TRAINING_METRIC_REGISTRY: dict[str, tuple[str, ...]] = {
+    "classification": ("accuracy",),
+    "multi_label": ("micro_f1",),
+}
+
+
+@dataclass(frozen=True)
+class MetricAdapter:
+    identifier: str
+    supported_tasks: tuple[str, ...]
+    evaluator: Callable[[Tensor, Tensor], float | Tensor]
+
+
+CUSTOM_METRIC_REGISTRY: dict[str, MetricAdapter] = {}
+
+
+def metric_names_for_task(task: str) -> tuple[str, ...]:
+    normalized_task = normalize_task(task)
+    custom = tuple(
+        name
+        for name, adapter in CUSTOM_METRIC_REGISTRY.items()
+        if normalized_task in adapter.supported_tasks
+    )
+    return (*METRIC_REGISTRY[normalized_task], *custom)
+
+
+def training_metric_names_for_task(task: str) -> tuple[str, ...]:
+    return TRAINING_METRIC_REGISTRY[normalize_task(task)]
+
+
+def register_metric(
+    name: str,
+    evaluator: Callable[[Tensor, Tensor], float | Tensor],
+    *,
+    supported_tasks: Sequence[str],
+) -> None:
+    """Register a final-evaluation metric over CPU targets and predictions."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Metric name cannot be empty.")
+    normalized = name.strip().lower()
+    if normalized in METRIC_REGISTRY or normalized in CUSTOM_METRIC_REGISTRY:
+        raise ValueError(f"Metric is already registered: {normalized}")
+    if not callable(evaluator):
+        raise TypeError("Metric evaluator must be callable.")
+    tasks = tuple(dict.fromkeys(normalize_task(task) for task in supported_tasks))
+    if not tasks:
+        raise ValueError("A metric adapter must support at least one task.")
+    CUSTOM_METRIC_REGISTRY[normalized] = MetricAdapter(normalized, tasks, evaluator)
+
+
+def _custom_metric_values(task: str, targets: Tensor, predictions: Tensor) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for name, adapter in CUSTOM_METRIC_REGISTRY.items():
+        if task not in adapter.supported_tasks:
+            continue
+        result = adapter.evaluator(targets, predictions)
+        if isinstance(result, Tensor):
+            if result.numel() != 1:
+                raise ValueError(f"Metric {name!r} must return one scalar value.")
+            result = result.item()
+        value = float(result)
+        if not isfinite(value):
+            raise ValueError(f"Metric {name!r} returned NaN or infinity.")
+        values[name] = value
+    return values
 
 
 def _tensor(value: Any, name: str) -> Tensor:
@@ -65,6 +162,34 @@ def _roc_curve(targets: Tensor, scores: Tensor) -> dict[str, Any]:
         "auc": auc,
         "false_positive_rate": fpr.tolist(),
         "true_positive_rate": tpr.tolist(),
+    }
+
+
+def _precision_recall_curve(targets: Tensor, scores: Tensor) -> dict[str, Any]:
+    """Build a tie-aware precision-recall curve and average precision."""
+    positives = int(targets.sum().item())
+    if positives == 0:
+        return {"average_precision": None, "precision": [], "recall": []}
+
+    order = torch.argsort(scores, descending=True, stable=True)
+    sorted_scores = scores[order]
+    sorted_targets = targets[order].to(torch.float64)
+    true_positives = sorted_targets.cumsum(dim=0)
+    group_ends = torch.ones(targets.numel(), dtype=torch.bool)
+    group_ends[:-1] = sorted_scores[:-1] != sorted_scores[1:]
+    true_positives = true_positives[group_ends]
+    selected_count = torch.arange(1, targets.numel() + 1, dtype=torch.float64)[group_ends]
+    recall = torch.cat((torch.zeros(1, dtype=torch.float64), true_positives / positives))
+    precision = torch.cat(
+        (torch.ones(1, dtype=torch.float64), true_positives / selected_count)
+    )
+    average_precision = float(
+        ((recall[1:] - recall[:-1]) * precision[1:]).sum().item()
+    )
+    return {
+        "average_precision": average_precision,
+        "precision": precision.tolist(),
+        "recall": recall.tolist(),
     }
 
 
@@ -133,7 +258,7 @@ def classification_metrics(
     macro_precision = float(precision.mean().item())
     macro_recall = float(recall.mean().item())
     macro_f1 = float(f1.mean().item())
-    return {
+    result = {
         "task": "classification",
         "sample_count": sample_count,
         "accuracy": correct / sample_count,
@@ -150,6 +275,8 @@ def classification_metrics(
         "confusion_matrix": matrix.tolist(),
         "confusion_matrix_labels": names,
     }
+    result.update(_custom_metric_values("classification", target_values, prediction_values))
+    return result
 
 
 def multilabel_metrics(
@@ -223,7 +350,7 @@ def multilabel_metrics(
     macro_precision = float(precision.mean().item())
     macro_recall = float(recall.mean().item())
     macro_f1 = float(f1.mean().item())
-    return {
+    result = {
         "task": "multi_label",
         "sample_count": target_values.shape[0],
         "threshold": float(threshold),
@@ -243,3 +370,7 @@ def multilabel_metrics(
         "roc_curves": roc_curves,
         "micro_roc_curve": micro_roc,
     }
+    result.update(
+        _custom_metric_values("multi_label", target_values, binary_predictions)
+    )
+    return result

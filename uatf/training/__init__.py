@@ -3,8 +3,17 @@
 from uatf.training.trainer import (
     EarlyStopping,
     Trainer,
+    TrainingEvent,
     build_early_stopping,
+    build_optimizer,
     build_scheduler,
 )
 
-__all__ = ["EarlyStopping", "Trainer", "build_early_stopping", "build_scheduler"]
+__all__ = [
+    "EarlyStopping",
+    "Trainer",
+    "TrainingEvent",
+    "build_early_stopping",
+    "build_optimizer",
+    "build_scheduler",
+]

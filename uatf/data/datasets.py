@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, TypeAlias
 
@@ -95,6 +97,14 @@ class _ImageDataset(Dataset[tuple[Tensor, Tensor]]):
         self.samples = samples
         self.transform = transform or transforms.ToTensor()
 
+    def with_transform(self, transform: Callable) -> _ImageDataset:
+        """Return a dataset view sharing validated samples with its own transform."""
+        if not callable(transform):
+            raise TypeError("Dataset transform must be callable.")
+        view = copy.copy(self)
+        view.transform = transform
+        return view
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -127,6 +137,7 @@ class ImageFolderDataset(_ImageDataset):
         root_path = Path(root).expanduser().resolve()
         if not root_path.is_dir():
             raise DatasetValidationError(f"Image dataset directory does not exist: {root_path}")
+        self.root = root_path
 
         class_directories = sorted(
             (path for path in root_path.iterdir() if path.is_dir()),
@@ -165,6 +176,7 @@ class CsvImageClassificationDataset(_ImageDataset):
         image_root: str | Path | None = None,
         transform: Callable | None = None,
         *,
+        class_names: Sequence[str] | None = None,
         verify_images: bool = True,
     ) -> None:
         csv_path = Path(csv_file).expanduser().resolve()
@@ -185,6 +197,7 @@ class CsvImageClassificationDataset(_ImageDataset):
         if not root.is_absolute():
             root = csv_path.parent / root
         root = root.resolve()
+        self.image_root = root
         path_column = header.index("image_path")
         label_column = header.index("label")
         raw_rows: list[tuple[int, Path, str]] = []
@@ -210,7 +223,18 @@ class CsvImageClassificationDataset(_ImageDataset):
 
         if not raw_rows:
             raise DatasetValidationError("Dataset CSV contains no image rows.")
-        self.classes = sorted(labels)
+        self.classes = sorted(labels) if class_names is None else list(class_names)
+        if (
+            not self.classes
+            or any(not isinstance(name, str) or not name for name in self.classes)
+            or len(set(self.classes)) != len(self.classes)
+        ):
+            raise DatasetValidationError("class_names must contain unique, non-empty labels.")
+        unknown_labels = labels.difference(self.classes)
+        if unknown_labels:
+            raise DatasetValidationError(
+                f"CSV contains label not present in the model asset: {sorted(unknown_labels)[0]}"
+            )
         self.class_to_idx = {name: index for index, name in enumerate(self.classes)}
         samples = [
             (path, self.class_to_idx[label])
@@ -264,6 +288,7 @@ class CsvMultiLabelDataset(_ImageDataset):
         if not root.is_absolute():
             root = csv_path.parent / root
         root = root.resolve()
+        self.image_root = root
         path_column = header.index("image_path")
         label_indices = [header.index(column) for column in selected_labels]
         samples: list[ImageSample] = []

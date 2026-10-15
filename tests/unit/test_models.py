@@ -9,10 +9,14 @@ from torchvision import models
 
 from uatf.config import load_config
 from uatf.models import (
+    LOSS_REGISTRY,
+    MODEL_ADAPTERS,
     MODEL_REGISTRY,
     build_model_from_config,
     get_loss,
     get_model,
+    get_model_adapter,
+    register_loss,
     register_model,
 )
 
@@ -102,6 +106,78 @@ def test_model_registry_accepts_new_builder() -> None:
         assert model.out_features == 7
     finally:
         del MODEL_REGISTRY[name]
+
+
+def test_model_adapters_describe_builtin_capabilities() -> None:
+    adapter = get_model_adapter("vit")
+
+    assert adapter.identifier == "vit"
+    assert adapter.display_name == "ViT-B/16"
+    assert adapter.supported_tasks == ("classification", "multi_label")
+    assert adapter.supports_pretrained is True
+    assert adapter.pretrained_source == "torchvision ViT_B_16_Weights.DEFAULT"
+    assert adapter.input_size == (224, 224)
+    assert adapter.input_size_required is True
+    assert adapter.classifier_head == "heads.head"
+    assert adapter.pretrained_cache_path is not None
+
+
+def test_pretrained_missing_cache_fails_before_download_in_offline_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(tmp_path / "torch-cache"))
+    monkeypatch.setenv("UATF_OFFLINE", "1")
+
+    with pytest.raises(RuntimeError, match="not cached.*No random-weight fallback"):
+        get_model("resnet50", num_classes=2, pretrained=True)
+
+
+def test_pretrained_load_errors_are_not_silently_replaced_by_random_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_load(*, weights: object) -> nn.Module:
+        raise OSError("network unavailable")
+
+    monkeypatch.delenv("UATF_OFFLINE", raising=False)
+    monkeypatch.setattr(models, "resnet50", fail_load)
+
+    with pytest.raises(RuntimeError, match="torchvision ResNet50_Weights.DEFAULT.*No random-weight fallback"):
+        get_model("resnet50", num_classes=2, pretrained=True)
+
+
+def test_registered_adapter_rejects_unsupported_task_and_pretraining() -> None:
+    name = "classification_only_test"
+    register_model(
+        name,
+        lambda output_count, pretrained: nn.Linear(2, output_count),
+        supported_tasks=("classification",),
+        supports_pretrained=False,
+    )
+    try:
+        with pytest.raises(ValueError, match="does not support task 'multi_label'"):
+            get_model(name, num_classes=2, task="multi_label")
+        with pytest.raises(ValueError, match="does not support pretrained weights"):
+            get_model(name, num_classes=2, pretrained=True)
+    finally:
+        MODEL_REGISTRY.pop(name, None)
+        MODEL_ADAPTERS.pop(name, None)
+
+
+def test_custom_loss_registry_checks_task_contract() -> None:
+    name = "test_custom_loss"
+    register_loss(
+        name,
+        nn.MSELoss,
+        supported_tasks=("classification",),
+        input_contract="scores",
+        target_contract="class-index scores",
+    )
+    try:
+        assert isinstance(get_loss("classification", name), nn.MSELoss)
+        with pytest.raises(ValueError, match="does not support task 'multi_label'"):
+            get_loss("multi_label", name)
+    finally:
+        LOSS_REGISTRY.pop(name, None)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")

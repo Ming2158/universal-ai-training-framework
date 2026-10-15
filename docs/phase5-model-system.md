@@ -46,14 +46,14 @@ model = build_model_from_config(config)
 loss_function = get_loss(config["task"]["type"])
 ```
 
-The supported model choices are `resnet50`, `convnext`, `efficientnet`, and `vit`. They use ResNet50, ConvNeXt-Tiny, EfficientNet-B0, and ViT-B/16 respectively. Add another architecture by writing a builder that takes `(output_count, pretrained)`, replaces that architecture's final classifier layer, and registering it with `register_model(name, builder)`.
+The supported model choices are `resnet50`, `convnext`, `efficientnet`, and `vit`. They use ResNet50, ConvNeXt-Tiny, EfficientNet-B0, and ViT-B/16 respectively. Their task support, pretrained source, input size, classifier head, and checkpoint/inference contract are available as `ModelAdapter` metadata. See the [Phase 7 model and training guide](phase7-model-training.md) for the metadata and offline weight behavior.
 
 ## Model terms
 
 - **Model:** the full neural network that maps an input image tensor to output logits.
 - **Backbone:** the feature extraction layers that learn visual patterns such as edges, textures, and shapes. In ResNet50 this is everything before `fc`; in ConvNeXt-Tiny it is the `features` stack plus classifier normalization and flattening.
 - **Classifier head:** the final layer that maps learned image features to one score per class or label. UATF replaces the original ImageNet head with a new linear layer sized for the current task.
-- **Pretrained:** initialized from weights learned earlier, here the torchvision ImageNet weights. Enabling this may download the weights on first use and therefore needs network access or a cached checkpoint.
+- **Pretrained:** initialized from weights learned earlier, here the torchvision ImageNet DEFAULT weights. Enabling this may download the weights on first use; set `UATF_OFFLINE=1` to reject an uncached checkpoint before a download attempt.
 - **Transfer learning:** reusing a pretrained backbone for a new task and replacing its output head. It can reduce the amount of task data and training time needed compared with learning all visual features from random initialization.
 - **Fine-tuning:** continuing training on task-specific data. The new head starts with fresh parameters; by default, backbone parameters remain trainable too, so the whole network can adapt.
 - **Logits:** raw, unnormalized output scores. They are the correct input to the selected PyTorch loss; apply sigmoid later when multi-label probabilities are needed for inference, or softmax for single-label probabilities.

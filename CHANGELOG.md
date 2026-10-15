@@ -4,14 +4,30 @@ Notable changes for each release are recorded here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-16
+
 ### Added
 
 - A bilingual interactive CLI wizard for choosing a task, dataset, model, and training settings.
 - A Windows launcher and a usage guide for GUI and CLI workflows.
+- A unified Python API and persistent task lifecycle with cooperative stop and checkpoint resume.
+- Dataset inspection, experiment and model-asset history, independent evaluation, and image inference.
+- Gradio progress monitoring, experiment browsing, model asset management, evaluation, and inference views.
+- Expanded training configuration with model adapters, optimizer and scheduler options, augmentation, and task-aware losses.
+
+### Compatibility
+
+- Existing UATF 1.0.0 YAML configurations and historical experiment directories remain readable.
+- New experiment records and model assets are stored alongside the existing local run directory layout.
+- The existing CLI configuration mode, Python components, and V1.0.0 release tag remain available and unchanged.
 
 ### Fixed
 
 - The interactive CLI wizard now works with legacy GBK Windows consoles.
+
+### Verification
+
+- See [V2.0.0 release notes](docs/release-notes-v2.0.0.md) and the [release acceptance record](docs/development/v2.0.0-release-acceptance.md) for verification scope and known gaps.
 
 ## [1.0.0] - 2026-10-08
 

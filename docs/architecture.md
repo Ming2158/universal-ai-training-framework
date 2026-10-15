@@ -1,58 +1,55 @@
 # UATF Architecture
 
-UATF 1.0.0 is a local, single-process image classification framework. The CLI coordinates modules that exchange ordinary PyTorch datasets, batches, models, and tensors. The Gradio UI writes a config and launches that same CLI in a subprocess.
+UATF V2.0.0 is a local image-classification framework with shared configuration, training, evaluation, and artifact code for its GUI, CLI, YAML, and Python API workflows. The Gradio interface is a workspace over these modules; it does not implement a separate training algorithm.
 
-## Training Flow
+## Entry Points and Training Flow
 
 ```mermaid
 flowchart LR
-    Config["YAML + CLI overrides"] --> CLI["uatf.cli"]
-    Data["uatf.data"] --> Loaders["DataLoader batches"]
-    CLI --> Data
+    YAML["YAML + overrides"] --> Config["uatf.config"]
+    API["uatf.api"] --> Config
+    CLI["train.py / uatf.cli"] --> Config
+    GUI["app.app + app.workspace"] -->|"validate and write YAML"| Child["uatf.cli subprocess"]
+    GUI <-->|"task state and JSONL events"| Tasks["uatf.tasks"]
+    Config --> Data["uatf.data"]
+    Data --> Loaders["DataLoader batches"]
     Loaders --> Trainer["uatf.training.Trainer"]
     Models["uatf.models"] --> Trainer
     Trainer --> Checkpoints["best/last checkpoints"]
     Trainer --> Evaluation["uatf.evaluation"]
-    Evaluation --> Artifacts["metrics, predictions, plots"]
-    CLI --> RunRecord["effective config + environment + timestamps"]
-    UI["app.app (Gradio)"] -->|"subprocess"| CLI
-    Artifacts --> UI
+    Evaluation --> Outputs["metrics, predictions, plots"]
+    CLI --> Experiments["uatf.experiment / uatf.experiments"]
+    Outputs --> Experiments
+    Experiments --> UIViews["experiment and model views"]
+    Evaluation --> Inference["uatf.inference"]
 ```
+
+The GUI keeps configuration and monitoring in separate pages. Starting a job writes its configuration and starts the CLI as a child process. The task lifecycle stores job state and structured events so the UI can refresh monitoring while the job continues. Switching workspace pages does not itself stop the child process. Stop requests are cooperative and take effect at a completed epoch boundary.
 
 ## Module Responsibilities
 
 | Module | Responsibility | Current contract |
 | --- | --- | --- |
-| `uatf.data` | Validate folders/CSVs, open and transform images, create splits and loaders | Samples are `(image_tensor, target_tensor)` |
-| `uatf.models` | Construct an architecture and replace its classifier head | Model returns raw `[batch, classes]` logits |
-| `uatf.training` | Train, validate, compute configured metrics, save/load checkpoints, resume, AMP | Batches contain input and target tensors; loss returns one scalar |
-| `uatf.evaluation` | Run inference and calculate classification metrics; write reports, predictions, plots | Task is `classification` or `multi_label` |
-| `uatf.config` | Load YAML, merge defaults, validate options and task/data combinations | Returns a normalized configuration mapping |
-| `uatf.cli` | Build loaders/model/loss/optimizer, run Trainer and Evaluation, record each experiment | One new output directory per run |
-| `uatf.logging_utils` | Configure console and experiment-file handlers | Console is concise; file includes timestamp and severity |
-| `app.app` | Accept a ZIP and training choices, run the CLI, display logs/results | Only the two documented classification ZIP layouts |
+| `uatf.config` | Load YAML or Python mappings, merge defaults, apply overrides, validate fields and task/data combinations | Produces a normalized configuration mapping |
+| `uatf.data` | Validate folder/CSV datasets, inspect samples, transform images, create deterministic splits and loaders | Samples are `(image_tensor, target_tensor)` |
+| `uatf.models` | Build supported architectures, adapt classifier heads, select task-aware losses | Models return raw `[batch, classes]` logits |
+| `uatf.training` | Train and validate, compute configured metrics, save/load checkpoints, resume, AMP and training strategies | Batches contain input and target tensors; loss returns one scalar |
+| `uatf.evaluation` | Evaluate classification and multi-label assets; write metrics, predictions and plots | Task is `classification` or `multi_label` |
+| `uatf.tasks` | Persist task lifecycle, state transitions, stop requests and structured progress events | Task identifiers connect the UI to a CLI run |
+| `uatf.experiment` / `uatf.experiments` | Run the shared Python API workflow, index experiment records and model assets, read legacy layouts | Existing run directories remain readable without migration writes |
+| `uatf.inference` | Load model assets and predict one image or a directory; export prediction CSV and model sidecars | Uses the same preprocessing and model adapters as training/evaluation |
+| `uatf.api` | Provide a higher-level configuration-driven Python interface | Additive facade over shared modules |
+| `uatf.cli` / `uatf.cli_wizard` | Execute configuration-driven jobs and provide the interactive CLI workflow | CLI remains usable without Gradio |
+| `app.app` / `app.workspace` / `app.monitoring` | Bind Gradio events and compose the workspace; monitor task events, logs, metrics, and resources | GUI delegates business operations to `uatf` modules and the CLI process |
 
-There is no separate `uatf.tasks` package in this release. Classification task choices are handled through task values and branches in config validation, loss selection, metric selection, evaluation, and UI code. The README and examples should describe the current modules rather than imply a task registry already exists.
+## Persistent Outputs and Compatibility
 
-## Experiment Outputs
+Each run records its effective configuration, dataset summary, model details, metrics, checkpoints, environment details, timestamps, and logs under the configured output root. Task, experiment, and asset indexes are additional local records. Generated datasets, logs, checkpoints, `outputs/`, virtual environments, build artifacts, and pytest temporary directories are not release source files.
 
-The CLI writes the normalized config before training. The final `metrics.json` includes UATF/Python/PyTorch versions, device, task and model details, dataset path/format/sample counts/class names, training history, evaluation metrics, checkpoint filenames, and UTC timestamps. `train.log` contains the run's INFO messages, DEBUG configuration snapshot, warnings, and exception traceback. Checkpoints and data remain local and are excluded from Git.
+V1 YAML files and historical experiment directories remain readable. Resume requires a compatible full training checkpoint such as `last_model.pth`; inference-only exported weights are not resume checkpoints. See the [migration guide](migration-v1-to-v2.md) for upgrade details.
 
-The dataset record describes its configured source and summary, not a cryptographic checksum of every image. For strict dataset identity, keep a versioned external dataset manifest alongside the run.
+## Scope and Extension Points
 
-## Adding a Model
+The current training and evaluation contracts support single-label and multi-label image classification on one machine. Detection, segmentation, distributed training, exact content hashing, and managed experiment storage are outside V2.0.0 scope. Adding another task requires coordinated data-target, model-output, loss, trainer, metric, configuration, and UI contracts; the current tensor-classification trainer cannot be reused unchanged for detection or segmentation.
 
-Register a builder in `uatf.models.factory.MODEL_REGISTRY`. The builder receives output count and pretrained selection, replaces the architecture's classifier head, and returns an `nn.Module` that emits raw logits. Add tests for output shape and the relevant loss before exposing the model in the UI.
-
-## Adding Object Detection or Segmentation
-
-Detection and segmentation need a task contract before they should be wired into the current classification branches. Expected changes include:
-
-1. Add task configuration/schema for the target format, model head, loss, metrics, and postprocessing options.
-2. Extend `uatf.data` with adapters that return structured targets such as boxes and labels or pixel masks. Update transforms so image geometry changes are applied consistently to targets.
-3. Define how models return predictions. Detection generally returns per-image dictionaries; segmentation returns class or mask logits. The current `Trainer` requires a single tensor prediction and tensor target, so it needs a small task-aware batch/loss protocol or a separate trainer adapter.
-4. Add task-specific losses and evaluation in `uatf.models` and `uatf.evaluation`, including the correct matching, IoU, AP, or mask metrics and prediction export format.
-5. Update config validation, CLI setup, Gradio controls, dataset help, README examples, and checkpoint metadata for the new task.
-6. Add unit tests for target decoding, geometry transforms, loss shapes, and metrics, plus an end-to-end smoke test on a tiny synthetic dataset.
-
-Model builders can continue to use the existing registry when the backbone is appropriate. The Trainer, dataset adapters, evaluator, and config schema are the main extension points; the current classification metrics and CSV outputs cannot be reused unchanged.
+Model builders are registered in `uatf.models.factory.MODEL_REGISTRY`. Dataset adapters, configuration validation, training contracts, and task-specific evaluation are the primary extension points. See [Configuration](configuration.md) for the supported schema and [Phase 9 GUI documentation](phase9-gradio-ui.md) for the workspace structure and behavior.

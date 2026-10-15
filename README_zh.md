@@ -6,20 +6,26 @@
 
 首次使用请查看[UATF 使用文档](使用文档.md)，了解 GUI 和 CLI 两种操作方式。
 
-UATF 1.0.0 是一个基于 PyTorch 的本地框架，用于训练和评估图像分类模型。单标签与多标签分类共用同一套数据集、模型、训练和评估流程。
+UATF 2.0.0 是一个基于 PyTorch 的本地图像分类框架，支持单标签与多标签任务，并提供共享的 GUI、CLI、YAML 和 Python API 工作流。
 
-`v1.0.0` 标签之后的改动尚未发布。交互式 CLI 向导记录在[更新日志的 Unreleased 部分](CHANGELOG.md)。
+V2.0.0 保留 V1.0.0 的 YAML 配置和历史实验目录，并增加数据集检查、持久任务、实验与模型资产管理、独立评估和推理。
 
 ## 支持功能
 
 - 支持文件夹和 CSV 数据集，包含图像校验和可复现的训练/验证集划分。
 - 支持 ResNet50、ConvNeXt-Tiny、EfficientNet-B0 和 ViT-B/16。
-- 支持 YAML 配置、命令行参数覆盖、CPU/CUDA 设备选择、可选 CUDA AMP、StepLR 和提前停止。
+- 支持 YAML 配置、命令行参数覆盖、CPU/CUDA 设备选择、可选 CUDA AMP、Adam/AdamW/SGD、StepLR/Cosine 调度、梯度裁剪与累积、提前停止。
+- 支持默认关闭的训练数据增强；验证和推理始终使用确定性预处理。
 - 保存最佳和最近检查点；Python `Trainer` API 支持恢复训练；提供指标、预测 CSV 和图表。
 - 提供本地 Gradio 界面，并复用相同的 CLI 训练流程。
+- 可从历史模型资产运行独立评估、单图推理和目录批量预测；支持错误样本查看及可重载的 PyTorch 权重导出。
 - 每次运行记录最终配置、数据集摘要、模型信息、指标、检查点名称、环境信息、时间戳和日志文件。
 
-当前版本尚未实现目标检测和图像分割。相关扩展模块请参阅[架构说明](docs/architecture.md)。
+独立评估与推理的输入格式、Python API 和导出侧车说明见 [Phase 6 文档](docs/phase6-independent-evaluation.md)。
+
+模型适配能力、预训练权重处理、增强参数、支持的训练策略和数据划分决策见 [Phase 7 模型与训练指南](docs/phase7-model-training.md)。
+
+当前版本范围不包括目标检测、图像分割、分布式训练和托管式实验存储。相关扩展模块请参阅[架构说明](docs/architecture.md)。
 
 ## 安装
 
@@ -142,6 +148,11 @@ uatf/cli_wizard.py         双语终端训练向导
 - [训练引擎](docs/phase6-training-engine.md)
 - [评估系统](docs/phase7-evaluation-system.md)
 - [配置与 CLI](docs/phase8-configuration-system.md)
+- [统一配置与 Python API](docs/configuration.md)
+- [V1.0.0 到 V2.0.0 迁移说明](docs/migration-v1-to-v2.md)
+- [V2.0.0 验收报告](docs/development/v2.0.0-phase8-acceptance.md)
+- [V2.0.0 发布说明](docs/release-notes-v2.0.0.md)
+- [V2.0.0 发布验收记录](docs/development/v2.0.0-release-acceptance.md)
 - [Gradio 界面](docs/phase9-gradio-ui.md)
 - [历史工程审查](docs/engineering-review.md)
 - [更新日志](CHANGELOG.md)
@@ -150,4 +161,4 @@ uatf/cli_wizard.py         双语终端训练向导
 
 ## 范围与局限
 
-UATF 1.0.0 面向单机图像分类。随机划分不支持分层抽样或分组划分。CLI 暂不提供恢复训练选项，但 Python API 中的 `Trainer.resume()` 可以使用。框架尚未提供精确的数据集内容校验和托管式实验存储。环境、数据和检查点相关问题见[故障排查](docs/troubleshooting.md)。
+UATF 2.0.0 面向单机单标签与多标签图像分类。随机划分不支持分层抽样或分组划分。CLI 没有独立的 `--resume` 参数；可通过 YAML 的 `training.resume_from`、`run_training()` 或 `Trainer.resume()` 恢复检查点。框架尚未提供精确的数据集内容校验和托管式实验存储。环境、数据和检查点相关问题见[故障排查](docs/troubleshooting.md)。

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "universal-ai-training-framework"
-version = "1.0.0"
+version = "2.0.0"
 description = "A beginner-friendly local framework for image model training"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,7 @@ uatf = "uatf.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.14"]
+monitor = ["psutil>=5.9", "nvidia-ml-py>=12"]
 
 [tool.ruff]
 line-length = 100

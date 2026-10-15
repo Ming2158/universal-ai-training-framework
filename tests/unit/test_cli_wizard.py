@@ -33,6 +33,8 @@ def test_multilabel_wizard_runs_with_gbk_console(
     assert language == "zh"
     assert configuration["task"]["type"] == "multi_label"
     assert configuration["dataset"]["format"] == "csv_multilabel"
+    assert "optimizer" not in configuration["training"]
     saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert saved_config["task"]["type"] == "multi_label"
+    assert "optimizer" not in saved_config["training"]
     assert "训练设置确认" in output.getvalue().decode("gbk")

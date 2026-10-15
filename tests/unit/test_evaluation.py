@@ -10,11 +10,15 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from uatf.config import validate_config
 from uatf.evaluation import (
+    CUSTOM_METRIC_REGISTRY,
     classification_metrics,
     evaluate_model,
     evaluate_training_run,
+    metric_names_for_task,
     multilabel_metrics,
+    register_metric,
     save_evaluation_plots,
 )
 
@@ -34,6 +38,29 @@ def test_classification_metrics_include_macro_micro_and_missing_class() -> None:
     assert result["confusion_matrix"] == [[1, 1, 0], [0, 2, 0], [0, 0, 0]]
     assert result["per_class"]["Disease C"]["support"] == 0
     assert result["per_class"]["Disease C"]["precision"] == 0
+
+
+def test_registered_metric_is_added_to_task_compatible_evaluation_and_config() -> None:
+    name = "exact_match_test"
+    register_metric(
+        name,
+        lambda targets, predictions: (targets == predictions).float().mean(),
+        supported_tasks=("classification",),
+    )
+    try:
+        assert name in metric_names_for_task("classification")
+        assert name not in metric_names_for_task("multi_label")
+        result = classification_metrics([0, 1], [0, 0])
+        assert result[name] == pytest.approx(0.5)
+        config = validate_config(
+            {
+                "dataset": {"path": "unused-dataset"},
+                "evaluation": {"primary_metric": name},
+            }
+        )
+        assert config["evaluation"]["primary_metric"] == name
+    finally:
+        CUSTOM_METRIC_REGISTRY.pop(name, None)
 
 
 def test_multilabel_auc_per_class_macro_and_missing_positive_class() -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 from PIL import Image
+from torchvision import transforms
 
 from uatf.data import (
     CsvImageClassificationDataset,
@@ -125,6 +126,67 @@ def test_split_is_reproducible_and_has_no_overlap(tmp_path: Path) -> None:
     assert first_indices[0].isdisjoint(first_indices[2])
     assert first_indices[1].isdisjoint(first_indices[2])
     assert set.union(*first_indices) == set(range(len(dataset)))
+
+
+def test_training_augmentation_is_randomized_only_in_training_views(tmp_path: Path) -> None:
+    image_path = tmp_path / "cats" / "asymmetric.png"
+    image_path.parent.mkdir(parents=True)
+    image = Image.new("RGB", (12, 8), "black")
+    for x in range(6, 12):
+        for y in range(8):
+            image.putpixel((x, y), (255, 255, 255))
+    image.save(image_path)
+    for index in range(3):
+        save_image(tmp_path / "dogs" / f"dog-{index}.png")
+
+    evaluation_transform = build_image_transform(8, mean=(0, 0, 0), std=(1, 1, 1))
+    training_transform = build_image_transform(
+        8,
+        mean=(0, 0, 0),
+        std=(1, 1, 1),
+        augmentation={"enabled": True, "horizontal_flip_probability": 1.0},
+        training=True,
+    )
+    dataset = ImageFolderDataset(tmp_path, transform=evaluation_transform)
+    train_loader, validation_loader, _ = create_data_loaders(
+        dataset,
+        batch_size=1,
+        validation_fraction=0.5,
+        seed=3,
+        train_transform=training_transform,
+        evaluation_transform=evaluation_transform,
+    )
+
+    training_view = train_loader.dataset.dataset
+    validation_view = validation_loader.dataset.dataset
+    assert isinstance(training_view.transform.transforms[0], transforms.RandomHorizontalFlip)
+    assert not any(
+        isinstance(operation, transforms.RandomHorizontalFlip)
+        for operation in validation_view.transform.transforms
+    )
+    validation_image = validation_view[0][0]
+    assert torch.equal(validation_image, validation_view[0][0])
+    assert not torch.equal(training_view[0][0], evaluation_transform(image))
+
+
+def test_image_transform_supports_rotation_and_color_jitter_only_for_training() -> None:
+    augmentation = {
+        "enabled": True,
+        "rotation_degrees": 12,
+        "brightness": 0.1,
+        "contrast": 0.2,
+        "saturation": 0.15,
+    }
+
+    train_operations = build_image_transform(augmentation=augmentation, training=True).transforms
+    evaluation_operations = build_image_transform(augmentation=augmentation).transforms
+
+    assert any(isinstance(operation, transforms.RandomRotation) for operation in train_operations)
+    assert any(isinstance(operation, transforms.ColorJitter) for operation in train_operations)
+    assert all(
+        not isinstance(operation, (transforms.RandomRotation, transforms.ColorJitter))
+        for operation in evaluation_operations
+    )
 
 
 @pytest.mark.parametrize(

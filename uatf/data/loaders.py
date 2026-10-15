@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from math import floor
+from typing import Callable
 
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
@@ -65,6 +66,8 @@ def create_data_loaders(
     test_fraction: float = 0.0,
     seed: int = 42,
     num_workers: int = 0,
+    train_transform: Callable | None = None,
+    evaluation_transform: Callable | None = None,
 ) -> tuple[DataLoader, DataLoader | None, DataLoader | None]:
     """Create shuffled training and ordered evaluation loaders from any Dataset."""
     if batch_size < 1:
@@ -78,6 +81,21 @@ def create_data_loaders(
         test_fraction=test_fraction,
         seed=seed,
     )
+    if train_transform is not None or evaluation_transform is not None:
+        with_transform = getattr(dataset, "with_transform", None)
+        if not callable(with_transform):
+            raise ValueError(
+                "Separate training and evaluation transforms require a dataset with "
+                "a with_transform() method."
+            )
+        if train_transform is not None:
+            train_set = Subset(with_transform_dataset(dataset, train_transform), train_set.indices)
+        if evaluation_transform is not None:
+            evaluation_dataset = with_transform_dataset(dataset, evaluation_transform)
+            if validation_set is not None:
+                validation_set = Subset(evaluation_dataset, validation_set.indices)
+            if test_set is not None:
+                test_set = Subset(evaluation_dataset, test_set.indices)
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
@@ -96,3 +114,14 @@ def create_data_loaders(
         else None
     )
     return train_loader, validation_loader, test_loader
+
+
+def with_transform_dataset(dataset: Dataset, transform: Callable) -> Dataset:
+    """Return an image dataset copy that uses one independent transform pipeline."""
+    method = getattr(dataset, "with_transform", None)
+    if not callable(method):
+        raise ValueError(
+            "Separate training and evaluation transforms require a dataset with "
+            "a with_transform() method."
+        )
+    return method(transform)

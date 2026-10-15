@@ -6,20 +6,26 @@
 
 For first-time setup, see the [UATF usage guide](使用文档.md) for the GUI and CLI workflows.
 
-UATF 1.0.0 is a local PyTorch framework for training and evaluating image classification models. It supports single-label and multi-label classification through the same dataset, model, training, and evaluation pipeline.
+UATF 2.0.0 is a local PyTorch framework for single-label and multi-label image classification, with shared GUI, CLI, YAML, and Python API workflows.
 
-Changes after the `v1.0.0` tag are unreleased work. The interactive CLI wizard is listed under [Unreleased](CHANGELOG.md).
+V2.0.0 retains V1.0.0 YAML configurations and historical experiment directories while adding dataset inspection, persistent tasks, experiment and model-asset management, independent evaluation, and inference.
 
 ## Supported Features
 
 - Folder and CSV datasets with image validation and deterministic train/validation splits.
 - ResNet50, ConvNeXt-Tiny, EfficientNet-B0, and ViT-B/16 models.
-- YAML configuration, CLI overrides, CPU/CUDA selection, optional CUDA AMP, StepLR, and early stopping.
+- YAML configuration, CLI overrides, CPU/CUDA selection, optional CUDA AMP, Adam/AdamW/SGD, StepLR/cosine scheduling, clipping, accumulation, and early stopping.
+- Default-off training augmentation with deterministic validation and inference preprocessing.
 - Best/last checkpoints, resume through the Python `Trainer` API, metrics, prediction CSV, and plots.
 - A local Gradio interface that uses the same CLI training pipeline.
+- Independent evaluation of saved model assets, single-image inference, directory prediction, error review, and reloadable PyTorch model exports.
 - Per-run effective config, dataset summary, model details, metrics, checkpoint names, environment information, timestamps, and log file.
 
-Object detection and segmentation are not implemented in this release. See [Architecture](docs/architecture.md) for the modules those tasks would extend.
+See the [Phase 6 guide](docs/phase6-independent-evaluation.md) for supported evaluation formats, Python APIs, output records, and exported model sidecars.
+
+See the [Phase 7 model and training guide](docs/phase7-model-training.md) for adapter capabilities, pretrained weight handling, augmentation settings, supported strategies, and split decisions.
+
+Object detection, segmentation, distributed training, and managed experiment storage are outside this release. See [Architecture](docs/architecture.md) for the modules those tasks would extend.
 
 ## Installation
 
@@ -142,6 +148,11 @@ uatf/cli_wizard.py         Bilingual interactive training wizard
 - [Training engine](docs/phase6-training-engine.md)
 - [Evaluation](docs/phase7-evaluation-system.md)
 - [Configuration and CLI](docs/phase8-configuration-system.md)
+- [Unified configuration and Python API](docs/configuration.md)
+- [V1.0.0 to V2.0.0 migration guide](docs/migration-v1-to-v2.md)
+- [V2.0.0 acceptance report](docs/development/v2.0.0-phase8-acceptance.md)
+- [V2.0.0 release notes](docs/release-notes-v2.0.0.md)
+- [V2.0.0 release acceptance](docs/development/v2.0.0-release-acceptance.md)
 - [Gradio UI](docs/phase9-gradio-ui.md)
 - [Historical Engineering Review](docs/engineering-review.md)
 - [Changelog](CHANGELOG.md)
@@ -150,4 +161,4 @@ uatf/cli_wizard.py         Bilingual interactive training wizard
 
 ## Scope and Limitations
 
-UATF 1.0.0 focuses on image classification on one machine. Random splitting is not stratified or group-aware. The CLI does not expose resume even though `Trainer.resume()` is available through the Python API. Exact dataset-content checksums and managed experiment storage are not provided. See [Troubleshooting](docs/troubleshooting.md) for common environment, data, and checkpoint issues.
+UATF 2.0.0 focuses on single-label and multi-label image classification on one machine. Random splitting is not stratified or group-aware. There is no dedicated CLI `--resume` flag; YAML `training.resume_from`, `run_training()`, and `Trainer.resume()` support checkpoint restoration. Exact dataset-content checksums and managed experiment storage are not provided. See [Troubleshooting](docs/troubleshooting.md) for common environment, data, and checkpoint issues.

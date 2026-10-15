@@ -9,10 +9,8 @@ from pathlib import Path, PurePosixPath
 from stat import S_ISLNK
 from typing import Any, Callable
 
-import yaml
-
-from uatf.config import validate_config
-from uatf.models import MODEL_REGISTRY
+from uatf.config import dump_config, validate_config
+from uatf.models import MODEL_REGISTRY, get_model_adapter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -351,7 +349,9 @@ def _learning_rate(ui: TerminalUI, default: float) -> float:
 
 def _model_label(ui: TerminalUI, name: str) -> str:
     key = MODEL_LABELS.get(name)
-    return f"{name} — {ui.text(key)}" if key else name
+    if key:
+        return f"{name} — {ui.text(key)}"
+    return get_model_adapter(name).display_name
 
 
 def run_wizard(language: str | None = None) -> tuple[dict[str, Any], Path, str] | None:
@@ -404,14 +404,20 @@ def run_wizard(language: str | None = None) -> tuple[dict[str, Any], Path, str] 
         ],
         default="resnet50" if "resnet50" in MODEL_REGISTRY else models[0],
     )
-    pretrained = ui.choose(
-        "pretrained",
-        [
-            ("yes", lambda current: current.text("yes")),
-            ("no", lambda current: current.text("no")),
-        ],
-        default="no",
-    ) == "yes"
+    adapter = get_model_adapter(model_name)
+    pretrained = (
+        ui.choose(
+            "pretrained",
+            [
+                ("yes", lambda current: current.text("yes")),
+                ("no", lambda current: current.text("no")),
+            ],
+            default="no",
+        )
+        == "yes"
+        if adapter.supports_pretrained
+        else False
+    )
     epochs = _positive_integer(ui, "epochs", 3)
     batch_size = _positive_integer(ui, "batch_size", 8)
     learning_rate = _learning_rate(ui, 0.001)
@@ -425,29 +431,28 @@ def run_wizard(language: str | None = None) -> tuple[dict[str, Any], Path, str] 
         default="auto",
     )
 
-    configuration = validate_config(
-        {
-            "task": {"type": task},
-            "dataset": {
-                "format": data_format,
-                "path": str(dataset_path),
-                "validation_fraction": 0.2,
-                "image_size": 224,
-            },
-            "model": {"name": model_name, "pretrained": pretrained},
-            "training": {
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "learning_rate": learning_rate,
-                "device": device,
-                "num_workers": 0,
-            },
-            "evaluation": {
-                "primary_metric": "accuracy" if task == "classification" else "micro_f1"
-            },
-            "output": {"directory": "outputs/cli_runs"},
-        }
-    )
+    source_configuration = {
+        "task": {"type": task},
+        "dataset": {
+            "format": data_format,
+            "path": str(dataset_path),
+            "validation_fraction": 0.2,
+            "image_size": 224,
+        },
+        "model": {"name": model_name, "pretrained": pretrained},
+        "training": {
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "device": device,
+            "num_workers": 0,
+        },
+        "evaluation": {
+            "primary_metric": "accuracy" if task == "classification" else "micro_f1"
+        },
+        "output": {"directory": "outputs/cli_runs"},
+    }
+    validate_config(source_configuration)
 
     ui.say("summary_title")
     task_label = ui.text("task_classification" if task == "classification" else "task_multi_label")
@@ -484,11 +489,10 @@ def run_wizard(language: str | None = None) -> tuple[dict[str, Any], Path, str] 
 
     config_path = PROJECT_ROOT / "outputs" / "cli_configs" / f"cli_{uuid.uuid4().hex}.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w", encoding="utf-8") as destination:
-        yaml.safe_dump(configuration, destination, sort_keys=False, allow_unicode=True)
+    dump_config(source_configuration, config_path)
     print(ui.text("config_saved").format(path=config_path))
     ui.say("starting")
-    return configuration, config_path, ui.language
+    return source_configuration, config_path, ui.language
 
 
 def print_completed(language: str, experiment_path: Path) -> None:

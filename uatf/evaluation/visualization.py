@@ -206,6 +206,43 @@ def _save_multilabel_roc(
     return paths
 
 
+def _save_precision_recall_plot(result: EvaluationResult, output_dir: Path) -> Path:
+    plt = _pyplot()
+    path = output_dir / "precision_recall_curve.png"
+    figure, axis = plt.subplots(figsize=(8, 7))
+    plotted = False
+    for name, curve in result.pr_curves.items():
+        if curve.get("average_precision") is None:
+            continue
+        axis.plot(
+            curve["recall"],
+            curve["precision"],
+            label=f"{name} (AP = {curve['average_precision']:.3f})",
+        )
+        plotted = True
+    if plotted:
+        axis.legend(loc="best")
+    else:
+        axis.text(
+            0.5,
+            0.5,
+            "Precision-recall is unavailable: no evaluated label has positive samples",
+            ha="center",
+            va="center",
+            wrap=True,
+        )
+    axis.set_xlabel("Recall")
+    axis.set_ylabel("Precision")
+    axis.set_title("Precision-recall curves")
+    axis.set_xlim(0, 1)
+    axis.set_ylim(0, 1.02)
+    axis.grid(alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+    return path
+
+
 def save_evaluation_plots(
     result: EvaluationResult,
     output_dir: str | Path,
@@ -220,4 +257,28 @@ def save_evaluation_plots(
         paths["confusion_matrix"] = _save_confusion_matrix(result, destination)
     else:
         paths.update(_save_multilabel_roc(result, destination))
+    if result.roc_curves and result.task == "classification":
+        plt = _pyplot()
+        paths["roc_curve"] = destination / "roc_curve.png"
+        figure, axis = plt.subplots(figsize=(8, 7))
+        for name, curve in result.roc_curves.items():
+            if curve.get("auc") is not None:
+                axis.plot(
+                    curve["false_positive_rate"],
+                    curve["true_positive_rate"],
+                    label=f"{name} (AUC = {curve['auc']:.3f})",
+                )
+        axis.plot([0, 1], [0, 1], linestyle="--", color="tab:gray", label="Random baseline")
+        axis.legend(loc="lower right")
+        axis.set_xlabel("False positive rate")
+        axis.set_ylabel("True positive rate")
+        axis.set_title("One-vs-rest ROC curves")
+        axis.set_xlim(0, 1)
+        axis.set_ylim(0, 1.02)
+        axis.grid(alpha=0.2)
+        figure.tight_layout()
+        figure.savefig(paths["roc_curve"], dpi=150)
+        plt.close(figure)
+    if result.pr_curves:
+        paths["precision_recall_curve"] = _save_precision_recall_plot(result, destination)
     return paths
