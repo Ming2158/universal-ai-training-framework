@@ -21,6 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dataset": {
         "validation_fraction": 0.2,
         "image_size": 224,
+        "resize_enabled": True,
         "mean": [0.485, 0.456, 0.406],
         "std": [0.229, 0.224, 0.225],
         "augmentation": {
@@ -175,7 +176,7 @@ def validate_config(configuration: Mapping[str, Any]) -> dict[str, Any]:
         dataset,
         {
             "format", "path", "train_dir", "validation_dir", "annotations_csv", "image_dir",
-            "label_columns", "validation_fraction", "image_size", "mean", "std", "augmentation",
+            "label_columns", "validation_fraction", "image_size", "resize_enabled", "mean", "std", "augmentation",
         },
     )
     _check_keys("model", model, {"name", "pretrained", "num_classes", "num_labels"})
@@ -293,6 +294,14 @@ def validate_config(configuration: Mapping[str, Any]) -> dict[str, Any]:
     if any(value < 1 for value in image_dimensions):
         raise ConfigurationError("dataset.image_size dimensions must be positive.")
     dataset["image_size"] = image_size
+    resize_enabled = dataset.get("resize_enabled", True)
+    if not isinstance(resize_enabled, bool):
+        raise ConfigurationError("dataset.resize_enabled must be a boolean.")
+    dataset["resize_enabled"] = resize_enabled
+    if adapter.input_size_required and not resize_enabled:
+        raise ConfigurationError(
+            f"Model {model['name']!r} requires fixed-size image resizing."
+        )
     for field, default in (("mean", [0.485, 0.456, 0.406]), ("std", [0.229, 0.224, 0.225])):
         values = dataset.get(field, default)
         if not isinstance(values, list) or len(values) != 3 or any(
@@ -306,7 +315,7 @@ def validate_config(configuration: Mapping[str, Any]) -> dict[str, Any]:
 
     if adapter.input_size_required:
         actual_size = (image_size, image_size) if isinstance(image_size, int) else tuple(image_size)
-        if actual_size != adapter.input_size:
+        if resize_enabled and actual_size != adapter.input_size:
             required = " x ".join(str(value) for value in adapter.input_size or ())
             raise ConfigurationError(
                 f"Model {model['name']!r} requires dataset.image_size {required}; "

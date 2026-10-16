@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import math
 import os
@@ -20,7 +21,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from stat import S_IFDIR, S_IFMT, S_IFREG, S_ISLNK
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import gradio as gr
 import pandas as pd
@@ -30,6 +31,7 @@ from PIL import Image
 from torchvision.transforms import ToPILImage
 
 from app.monitoring import HardwareResourceSampler, format_resource_snapshot
+from uatf.config import resolve_config
 from uatf.data import DatasetInspection, inspect_dataset
 from uatf.data.transforms import build_image_transform
 from uatf.evaluation import EvaluationResult, evaluate_model_asset
@@ -55,7 +57,9 @@ CONFIG_ROOT = PROJECT_ROOT / "outputs" / "ui_configs"
 DATASET_ROOT = PROJECT_ROOT / "outputs" / "ui_datasets"
 DATASET_REGISTRY = DATASET_ROOT / "registry"
 MAX_ZIP_MEMBERS = 50_000
-MAX_ZIP_UNCOMPRESSED_BYTES = 20 * 1024**3
+MAX_ZIP_UNCOMPRESSED_BYTES = 128 * 1024**3
+MIN_UPLOAD_FREE_SPACE_BYTES = 2 * 1024**3
+DEFAULT_IMAGE_SIZE = 224
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -76,6 +80,63 @@ WORKSPACE_PAGES = (
     "评估与推理",
 )
 GUI_MONITORED_TASK_IDS: set[str] = set()
+UI_TRAINING_STATE: dict[str, dict[str, Any]] = {}
+UI_TRAINING_STATE_LOCK = threading.RLock()
+
+
+def _progress_bar_html(
+    fraction: float | None,
+    description: str,
+    *,
+    title: str,
+    state: str = "running",
+) -> str:
+    safe_title = html.escape(title)
+    safe_description = html.escape(description)
+    if fraction is None:
+        percentage_label = "处理中"
+        value_attribute = ""
+        fill_width = "32%"
+        animation = "animation: uatf-progress-sweep 1.5s ease-in-out infinite alternate;"
+    else:
+        percentage = round(max(0.0, min(1.0, fraction)) * 100)
+        percentage_label = f"{percentage}%"
+        value_attribute = f'aria-valuenow="{percentage}"'
+        fill_width = f"{percentage}%"
+        animation = ""
+    color = "#ad3f42" if state == "error" else "#267256"
+    return (
+        '<section role="status" aria-live="polite" '
+        'style="display:grid;gap:7px;padding:10px 12px;border:1px solid #d9e1dc;'
+        'border-radius:5px;background:#fff;color:#202b26">'
+        '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center">'
+        f'<strong style="font-size:13px">{safe_title}</strong>'
+        f'<span style="font-size:12px;color:#63716a">{percentage_label}</span>'
+        '</div>'
+        f'<div role="progressbar" aria-valuemin="0" aria-valuemax="100" {value_attribute} '
+        'style="height:8px;overflow:hidden;border-radius:4px;background:#e8efeb">'
+        f'<div style="height:100%;width:{fill_width};background:{color};border-radius:4px;'
+        f'transition:width .2s ease;{animation}"></div></div>'
+        f'<div style="font-size:12px;color:#46534b;overflow-wrap:anywhere">{safe_description}</div>'
+        '<style>@keyframes uatf-progress-sweep{from{transform:translateX(-55%)}'
+        'to{transform:translateX(215%)}}</style></section>'
+    )
+
+
+def _offer_latest(progress_queue: queue.Queue[Any], value: Any) -> None:
+    try:
+        progress_queue.put_nowait(value)
+    except queue.Full:
+        try:
+            progress_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            progress_queue.put_nowait(value)
+        except queue.Full:
+            pass
+
+
 WORKSPACE_NEUTRAL_HUE = gr.themes.Color(
     c50="#f4f7f5",
     c100="#eef3f0",
@@ -254,7 +315,8 @@ def start_training_for_ui(
     data_format: str,
     validation_fraction: float,
     seed: float,
-    image_size: float,
+    image_size: float | None,
+    resize_enabled: bool,
     accept_warnings: bool,
     model_name: str,
     epochs: float,
@@ -262,10 +324,10 @@ def start_training_for_ui(
     learning_rate: float,
     device: str,
     augmentation_enabled: bool = False,
-    progress: gr.Progress = gr.Progress(track_tqdm=False),
-) -> Iterator[tuple[Any, ...]]:
-    routed = False
-    for update in start_training(
+    num_workers: float = 0,
+) -> tuple[Any, ...]:
+    task_id = uuid.uuid4().hex
+    training_iterator = start_training(
         upload_path,
         local_path,
         dataset_state,
@@ -281,30 +343,188 @@ def start_training_for_ui(
         learning_rate,
         device,
         augmentation_enabled,
-        progress,
-    ):
-        task_id = update[24] if len(update) > 24 and isinstance(update[24], str) else None
-        try:
-            task = get_task(OUTPUT_ROOT, task_id) if task_id else None
-        except FileNotFoundError:
-            task = None
-        can_stop = bool(task and task.get("status") in ACTIVE_STATUSES)
-        if task_id:
-            if can_stop:
-                GUI_MONITORED_TASK_IDS.add(task_id)
-            else:
-                GUI_MONITORED_TASK_IDS.discard(task_id)
-        stop_update = gr.update(interactive=can_stop)
-        if not routed and len(update) > 24 and isinstance(update[24], str) and update[24]:
-            routed = True
-            yield (*update, *_navigate_workspace("训练监控"), stop_update)
-        else:
-            yield (
-                *update,
-                gr.skip(),
-                *(gr.skip() for _ in WORKSPACE_PAGES),
-                stop_update,
+        reserved_task_id=task_id,
+        resize_enabled=resize_enabled,
+        num_workers=num_workers,
+        progress=_discard_training_progress,
+    )
+    try:
+        initial_update = next(training_iterator)
+    except StopIteration:
+        initial_update = (
+            "无法创建训练任务",
+            0,
+            "-",
+            "尚未计算",
+            "0:00",
+            "计算中",
+            "尚未计算",
+            "尚未计算",
+            "尚未计算",
+            "尚未计算",
+            "尚未计算",
+            "尚未计算",
+            "尚未计算",
+            "尚未计算",
+            _chart_frame([]),
+            _chart_frame([]),
+            _chart_frame([]),
+            "",
+            None,
+            "训练请求没有产生启动状态。",
+            "",
+            {},
+            "等待后台训练状态",
+            None,
+            "",
+        )
+        _store_ui_training_update(task_id, initial_update, active=False)
+        return (
+            *initial_update,
+            *(gr.skip() for _ in range(1 + len(WORKSPACE_PAGES))),
+            gr.update(interactive=False),
+            gr.update(active=False),
+        )
+
+    if not initial_update[24] or initial_update[19]:
+        return (
+            *initial_update,
+            *(gr.skip() for _ in range(1 + len(WORKSPACE_PAGES))),
+            gr.update(interactive=False),
+            gr.update(active=False),
+        )
+
+    _store_ui_training_update(task_id, initial_update, active=True)
+    GUI_MONITORED_TASK_IDS.add(task_id)
+    worker = threading.Thread(
+        target=_consume_training_updates,
+        args=(task_id, training_iterator),
+        name=f"uatf-ui-training-{task_id[:8]}",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except RuntimeError as error:
+        failed = list(initial_update)
+        failed[0] = "无法启动训练后台任务"
+        failed[19] = str(error)
+        failed[20] = traceback.format_exc()
+        initial_update = tuple(failed)
+        _store_ui_training_update(task_id, initial_update, active=False)
+        GUI_MONITORED_TASK_IDS.discard(task_id)
+        training_iterator.close()
+        return (
+            *initial_update,
+            *_navigate_workspace("训练监控"),
+            gr.update(interactive=False),
+            gr.update(active=False),
+        )
+
+    return (
+        *initial_update,
+        *_navigate_workspace("训练监控"),
+        gr.update(interactive=True),
+        gr.update(active=True),
+    )
+
+
+def _discard_training_progress(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
+def _store_ui_training_update(
+    task_id: str, update: tuple[Any, ...] | None = None, *, active: bool | None = None
+) -> None:
+    with UI_TRAINING_STATE_LOCK:
+        state = UI_TRAINING_STATE.setdefault(task_id, {})
+        if update is not None:
+            state["update"] = update
+        if active is not None:
+            state["active"] = active
+        state["updated_at"] = time.monotonic()
+        if len(UI_TRAINING_STATE) > 16:
+            for old_task_id in list(UI_TRAINING_STATE):
+                if old_task_id != task_id and not UI_TRAINING_STATE[old_task_id].get("active"):
+                    del UI_TRAINING_STATE[old_task_id]
+                    if len(UI_TRAINING_STATE) <= 16:
+                        break
+
+
+def _consume_training_updates(task_id: str, training_iterator: Iterator[tuple[Any, ...]]) -> None:
+    try:
+        for update in training_iterator:
+            _store_ui_training_update(task_id, update)
+    except Exception as error:
+        details = traceback.format_exc()
+        with UI_TRAINING_STATE_LOCK:
+            previous = UI_TRAINING_STATE.get(task_id, {}).get("update")
+        if previous:
+            failed = list(previous)
+            failed[0] = "训练监控发生错误"
+            failed[19] = str(error)
+            failed[20] = details
+            _store_ui_training_update(task_id, tuple(failed))
+    finally:
+        _store_ui_training_update(task_id, active=False)
+        GUI_MONITORED_TASK_IDS.discard(task_id)
+
+
+def ui_training_is_active(task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    with UI_TRAINING_STATE_LOCK:
+        return bool(UI_TRAINING_STATE.get(task_id, {}).get("active"))
+
+
+def poll_training_for_ui(task_id: str | None) -> tuple[Any, ...]:
+    if not task_id:
+        return (
+            *(gr.skip() for _ in range(25)),
+            gr.update(interactive=False),
+            gr.update(active=False),
+        )
+    with UI_TRAINING_STATE_LOCK:
+        state = dict(UI_TRAINING_STATE.get(task_id, {}))
+    update = state.get("update")
+    monitor_active = bool(state.get("active"))
+    try:
+        record = get_task(OUTPUT_ROOT, task_id)
+    except (FileNotFoundError, OSError, ValueError):
+        record = None
+    task_active = bool(record and record.get("status") in ACTIVE_STATUSES)
+
+    if update is None or (task_active and not monitor_active):
+        if record is None:
+            return (
+                *(gr.skip() for _ in range(25)),
+                gr.update(interactive=False),
+                gr.update(active=False),
             )
+        persisted = refresh_task_status(task_id)
+        restored = [gr.skip() for _ in range(25)]
+        restored[0] = persisted[0]
+        restored[1] = persisted[1]
+        restored[2] = persisted[2]
+        restored[3] = str(record.get("stage") or "从任务记录恢复")
+        restored[17] = persisted[3]
+        restored[18] = persisted[4]
+        restored[19] = persisted[5]
+        restored[20] = persisted[6]
+        restored[24] = task_id
+        return (
+            *restored,
+            gr.update(interactive=task_active and record.get("status") != "Stopping"),
+            gr.update(active=task_active),
+        )
+
+    can_stop = bool(
+        task_active and record is not None and record.get("status") != "Stopping"
+    )
+    return (
+        *update,
+        gr.update(interactive=can_stop),
+        gr.update(active=monitor_active or task_active),
+    )
 
 
 def launch_copied_configuration_for_ui(configuration_text: str | None) -> tuple[Any, ...]:
@@ -362,6 +582,8 @@ def build_training_config(
     image_root: str | Path | None = None,
     label_columns: list[str] | None = None,
     augmentation_enabled: bool = False,
+    resize_enabled: bool = True,
+    num_workers: int = 0,
 ) -> dict[str, Any]:
     """Build the GUI's input mapping using the shared UATF configuration schema."""
     selected_format = data_format or (
@@ -372,6 +594,7 @@ def build_training_config(
         "path": str(dataset_path),
         "validation_fraction": validation_fraction,
         "image_size": image_size,
+        "resize_enabled": resize_enabled,
         "mean": list(_NORMALIZE_MEAN),
         "std": list(_NORMALIZE_STD),
         "augmentation": {"enabled": augmentation_enabled},
@@ -389,7 +612,7 @@ def build_training_config(
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "device": device,
-            "num_workers": 0,
+            "num_workers": num_workers,
             "seed": seed,
         },
         "evaluation": {"primary_metric": "accuracy" if task == "classification" else "micro_f1"},
@@ -553,6 +776,7 @@ def launch_copied_configuration(configuration_text: str | None) -> tuple[str, st
                 stdout=log_output,
                 stderr=subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
         return f"已启动新训练任务 {task_id}，任务状态可在右侧训练面板查询。", task_id
     except Exception as error:
@@ -876,11 +1100,27 @@ def run_asset_directory_prediction_ui(
     return f"批量推理完成：{len(rows)} 张图片。", frame, str(csv_path)
 
 
-def _archive_digest(archive_path: Path) -> str:
+def _archive_digest(
+    archive_path: Path,
+    progress_callback: Callable[[float | None, str], None] | None = None,
+) -> str:
     digest = hashlib.sha256()
+    total_bytes = archive_path.stat().st_size
+    hashed_bytes = 0
+    update_interval = max(1, total_bytes // 100)
+    next_update = update_interval
     with archive_path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
+            hashed_bytes += len(chunk)
+            if progress_callback is not None and (
+                hashed_bytes >= next_update or hashed_bytes == total_bytes
+            ):
+                progress_callback(
+                    hashed_bytes / max(total_bytes, 1),
+                    f"校验 ZIP 文件 {hashed_bytes / 1024**3:.2f}/{total_bytes / 1024**3:.2f} GiB",
+                )
+                next_update = hashed_bytes + update_interval
     return digest.hexdigest()
 
 
@@ -906,10 +1146,27 @@ def _save_archive_cache_index(index: dict[str, str]) -> None:
     temporary.replace(index_path)
 
 
+def _normalize_image_size(image_size: Any, resize_enabled: bool) -> int:
+    if not isinstance(resize_enabled, bool):
+        raise ValueError("缩放开关无效。")
+    if not resize_enabled:
+        return DEFAULT_IMAGE_SIZE
+    if (
+        isinstance(image_size, bool)
+        or not isinstance(image_size, (int, float))
+        or not math.isfinite(image_size)
+        or not float(image_size).is_integer()
+        or image_size < 1
+    ):
+        raise ValueError("启用缩放时，目标尺寸必须是大于 0 的整数。")
+    return int(image_size)
+
+
 def _safe_extract_dataset(
     upload_path: str,
     task: str,
     data_format: str | None = None,
+    progress_callback: Callable[[float | None, str], None] | None = None,
 ) -> Path:
     if not upload_path:
         raise ValueError("请先上传 ZIP 格式的数据集。")
@@ -928,13 +1185,26 @@ def _safe_extract_dataset(
         or len(digest) != 64
         or any(character not in "0123456789abcdef" for character in digest)
     ):
-        digest = _archive_digest(archive_path)
+        if progress_callback is not None:
+            progress_callback(0.0, "正在校验 ZIP 文件")
+        digest = _archive_digest(
+            archive_path,
+            progress_callback=(
+                lambda fraction, description: progress_callback(
+                    0.2 * (fraction or 0.0), description
+                )
+            )
+            if progress_callback is not None
+            else None,
+        )
     destination = UPLOAD_ROOT / digest
     complete_marker = UPLOAD_ROOT / f".{digest}.complete"
     if destination.is_dir() and complete_marker.is_file():
         if cache_index.get(source_key) != digest:
             cache_index[source_key] = digest
             _save_archive_cache_index(cache_index)
+        if progress_callback is not None:
+            progress_callback(1.0, "ZIP 已解压，复用导入缓存")
         return destination
     if destination.exists():
         shutil.rmtree(destination)
@@ -944,7 +1214,17 @@ def _safe_extract_dataset(
             members: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
             seen_names: set[str] = set()
             advertised_size = 0
-            for info in archive.infolist():
+            archive_members = archive.infolist()
+            for member_index, info in enumerate(archive_members, start=1):
+                if progress_callback is not None and (
+                    member_index == 1
+                    or member_index % max(1, len(archive_members) // 100) == 0
+                    or member_index == len(archive_members)
+                ):
+                    progress_callback(
+                        0.2 + 0.12 * member_index / max(len(archive_members), 1),
+                        f"读取 ZIP 目录 {member_index:,}/{len(archive_members):,} 项",
+                    )
                 normalized = info.filename.replace("\\", "/")
                 path = PurePosixPath(normalized)
                 parts = tuple(part for part in path.parts if part not in {"", "."})
@@ -976,14 +1256,26 @@ def _safe_extract_dataset(
                     raise ValueError("ZIP 文件条目包含无效的文件大小。")
                 advertised_size += info.file_size
                 if advertised_size > MAX_ZIP_UNCOMPRESSED_BYTES:
-                    raise ValueError("ZIP 解压后超过 20 GiB 的安全限制。")
+                    raise ValueError("ZIP 解压后超过 128 GiB 的安全限制。")
                 members.append((info, parts))
             if len(members) > MAX_ZIP_MEMBERS:
                 raise ValueError("ZIP 文件数量超过 50,000 个的安全限制。")
             if not members:
                 raise ValueError("ZIP 文件中没有可导入的内容。")
+            required_space = advertised_size + MIN_UPLOAD_FREE_SPACE_BYTES
+            available_space = shutil.disk_usage(UPLOAD_ROOT).free
+            if available_space < required_space:
+                raise ValueError(
+                    "解压空间不足：需要至少 "
+                    f"{required_space / 1024**3:.1f} GiB，可用 "
+                    f"{available_space / 1024**3:.1f} GiB。"
+                )
 
             copied_bytes = 0
+            extraction_interval = max(1, advertised_size // 100)
+            next_extraction_update = extraction_interval
+            if progress_callback is not None:
+                progress_callback(0.33, f"开始解压 {len(members):,} 个文件")
             for info, parts in members:
                 output_path = destination.joinpath(*parts)
                 if not output_path.resolve().is_relative_to(destination.resolve()):
@@ -996,13 +1288,24 @@ def _safe_extract_dataset(
                     while chunk := source.read(1024 * 1024):
                         copied_bytes += len(chunk)
                         if copied_bytes > MAX_ZIP_UNCOMPRESSED_BYTES:
-                            raise ValueError("ZIP 解压内容超过 20 GiB 的安全限制。")
+                            raise ValueError("ZIP 解压内容超过 128 GiB 的安全限制。")
                         output.write(chunk)
+                        if progress_callback is not None and (
+                            copied_bytes >= next_extraction_update
+                            or copied_bytes == advertised_size
+                        ):
+                            progress_callback(
+                                0.33 + 0.65 * copied_bytes / max(advertised_size, 1),
+                                f"解压数据 {copied_bytes / 1024**3:.2f}/{advertised_size / 1024**3:.2f} GiB",
+                            )
+                            next_extraction_update = copied_bytes + extraction_interval
             if copied_bytes != sum(info.file_size for info, _ in members if not info.is_dir()):
                 raise ValueError("ZIP 文件实际解压大小与目录信息不一致。")
         complete_marker.write_text("complete", encoding="ascii")
         cache_index[source_key] = digest
         _save_archive_cache_index(cache_index)
+        if progress_callback is not None:
+            progress_callback(1.0, "ZIP 解压完成")
     except zipfile.BadZipFile as error:
         shutil.rmtree(destination, ignore_errors=True)
         raise ValueError("无法读取 ZIP 文件，请确认文件没有损坏。") from error
@@ -1026,6 +1329,7 @@ def _register_dataset(inspection: DatasetInspection) -> str:
         "format": inspection.format,
         "sample_count": inspection.sample_count,
         "valid_sample_count": inspection.valid_sample_count,
+        "image_content_verified": inspection.image_content_verified,
         "labels": inspection.class_names,
         "class_counts": inspection.class_counts,
         "split_strategy": inspection.split_strategy,
@@ -1038,26 +1342,6 @@ def _register_dataset(inspection: DatasetInspection) -> str:
     return record_id
 
 
-def _report_fingerprint(report: dict[str, Any]) -> str:
-    manifest = {
-        key: report[key]
-        for key in (
-            "path",
-            "format",
-            "sample_count",
-            "valid_sample_count",
-            "class_names",
-            "class_counts",
-            "split",
-            "errors",
-            "warnings",
-            "samples",
-        )
-    }
-    encoded = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _inspect_selected_dataset(
     upload_path: str | None,
     local_path: str | None,
@@ -1066,18 +1350,11 @@ def _inspect_selected_dataset(
     validation_fraction: float,
     seed: float,
     image_size: float,
+    *,
+    resize_enabled: bool = True,
+    verify_image_content: bool = False,
+    progress_callback: Callable[[float | None, str], None] | None = None,
 ) -> tuple[DatasetInspection, dict[str, Any], dict[str, Any]]:
-    if upload_path and local_path and local_path.strip():
-        raise ValueError("请只选择 ZIP 上传或本地目录路径中的一种数据来源。")
-    if upload_path:
-        path = _safe_extract_dataset(upload_path, task, data_format)
-        source = "zip"
-    elif local_path and local_path.strip():
-        path = Path(local_path.strip()).expanduser().resolve()
-        source = "local"
-    else:
-        raise ValueError("请上传 ZIP，或填写 UATF 服务端可访问的数据集路径。")
-
     if (
         isinstance(validation_fraction, bool)
         or not isinstance(validation_fraction, (int, float))
@@ -1088,29 +1365,66 @@ def _inspect_selected_dataset(
     if (
         isinstance(seed, bool)
         or not isinstance(seed, (int, float))
+        or not math.isfinite(seed)
         or not float(seed).is_integer()
         or seed < 0
     ):
         raise ValueError("随机种子必须是非负整数。")
-    if (
-        isinstance(image_size, bool)
-        or not isinstance(image_size, (int, float))
-        or not float(image_size).is_integer()
-        or image_size < 1
-    ):
-        raise ValueError("图像尺寸必须是正整数。")
-
+    image_size = _normalize_image_size(image_size, resize_enabled)
     if task == "multi_label" and data_format != "csv_multilabel":
         raise ValueError("多标签分类要求 `csv_multilabel` 格式。")
     if task == "classification" and data_format == "csv_multilabel":
         raise ValueError("单标签分类不能使用 `csv_multilabel` 格式。")
+    if upload_path and local_path and local_path.strip():
+        raise ValueError("请只选择 ZIP 上传或本地目录路径中的一种数据来源。")
+    if upload_path:
+        if progress_callback is not None:
+            progress_callback(0.0, "准备导入 ZIP 数据集")
+        path = _safe_extract_dataset(
+            upload_path,
+            task,
+            data_format,
+            progress_callback=(
+                lambda fraction, description: progress_callback(
+                    fraction * 0.28 if fraction is not None else None,
+                    description,
+                )
+            )
+            if progress_callback is not None
+            else None,
+        )
+        source = "zip"
+    elif local_path and local_path.strip():
+        if progress_callback is not None:
+            progress_callback(0.0, "准备扫描本地数据集")
+        path = Path(local_path.strip()).expanduser().resolve()
+        source = "local"
+    else:
+        raise ValueError("请上传 ZIP，或填写 UATF 服务端可访问的数据集路径。")
+
+    inspection_start = 0.3 if source == "zip" else 0.02
+    inspection_span = 0.62 if source == "zip" else 0.88
+
+    def report_inspection_progress(fraction: float | None, description: str) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            inspection_start + fraction * inspection_span
+            if fraction is not None
+            else None,
+            description,
+        )
 
     inspection = inspect_dataset(
         path,
         data_format,
         validation_fraction=float(validation_fraction),
         seed=int(seed),
+        progress_callback=report_inspection_progress,
+        verify_image_content=verify_image_content,
     )
+    if progress_callback is not None:
+        progress_callback(None, "整理样本清单")
     report = inspection.to_dict(include_samples=True)
     dataset_id = _register_dataset(inspection)
     report["dataset_id"] = dataset_id
@@ -1122,12 +1436,15 @@ def _inspect_selected_dataset(
         "format": data_format,
         "validation_fraction": float(validation_fraction),
         "seed": int(seed),
-        "image_size": int(image_size),
+        "image_size": image_size,
+        "resize_enabled": resize_enabled,
         "dataset_path": str(inspection.path),
         "dataset_id": dataset_id,
-        "fingerprint": _report_fingerprint(report),
+        "verify_image_content": verify_image_content,
         "report": report,
     }
+    if progress_callback is not None:
+        progress_callback(0.98, "数据集统计已生成")
     return inspection, report, state
 
 
@@ -1204,7 +1521,12 @@ def _class_distribution_rows(report: dict[str, Any]) -> list[list[Any]]:
     ]
 
 
-def _preview_at(report: dict[str, Any], index: int, image_size: int) -> tuple[Any, Any, str, int]:
+def _preview_at(
+    report: dict[str, Any],
+    index: int,
+    image_size: int,
+    resize_enabled: bool = True,
+) -> tuple[Any, Any, str, int]:
     samples = report["samples"]
     if not samples:
         return None, None, "没有可预览的有效图片。", 0
@@ -1216,6 +1538,7 @@ def _preview_at(report: dict[str, Any], index: int, image_size: int) -> tuple[An
         image_size=image_size,
         mean=_NORMALIZE_MEAN,
         std=_NORMALIZE_STD,
+        resize_enabled=resize_enabled,
     )
     normalized = transform(original)
     mean = torch.tensor(_NORMALIZE_MEAN).view(3, 1, 1)
@@ -1230,12 +1553,23 @@ def _inspection_summary(report: dict[str, Any]) -> str:
     status = {"ready": "检查通过", "warning": "检查通过，有警告", "blocked": "存在阻断错误"}[
         report["status"]
     ]
+    if not report.get("image_content_verified", True):
+        status = {
+            "ready": "结构检查完成",
+            "warning": "结构检查完成，有警告",
+            "blocked": "结构检查发现阻断错误",
+        }[report["status"]]
     split = report["split"]
+    image_validation = (
+        "已逐张验证图片内容"
+        if report.get("image_content_verified", True)
+        else "未逐张验证图片内容（训练时按需读取）"
+    )
     return (
         f"**{status}**  ·  数据集 ID `{report['dataset_id']}`\n\n"
         f"路径：`{report['path']}`  \n"
         f"格式：`{report['format']}`  ·  样本：{report['sample_count']}（有效 {report['valid_sample_count']}）  ·  "
-        f"标签：{len(report['class_names'])}  \n"
+        f"标签：{len(report['class_names'])}  ·  图片内容：{image_validation}  \n"
         f"划分：{split['strategy']}  ·  训练 {split['train_count']} / 验证 {split['validation_count']}  ·  "
         f"验证比例 {split['validation_fraction']:.0%}  ·  随机种子 {split['seed']}"
     )
@@ -1249,20 +1583,55 @@ def inspect_dataset_ui(
     validation_fraction: float,
     seed: float,
     image_size: float,
+    progress: gr.Progress | None = None,
+    progress_callback: Callable[[float | None, str], None] | None = None,
+    verify_image_content: bool = False,
+    resize_enabled: bool = True,
 ) -> tuple[Any, ...]:
     try:
+        def report_progress(fraction: float | None, description: str) -> None:
+            if progress is not None and fraction is not None:
+                progress(fraction, desc=description)
+            if progress_callback is not None:
+                progress_callback(fraction, description)
+
         inspection, report, state = _inspect_selected_dataset(
-            upload_path, local_path, task, data_format, validation_fraction, seed, image_size
+            upload_path,
+            local_path,
+            task,
+            data_format,
+            validation_fraction,
+            seed,
+            image_size,
+            resize_enabled=resize_enabled,
+            verify_image_content=verify_image_content,
+            progress_callback=report_progress,
         )
+        report_progress(0.985, "生成类别统计图")
         initial_index = (
             random.Random(state["seed"]).randrange(len(report["samples"]))
             if report["samples"]
             else 0
         )
-        original, processed, information, initial_index = _preview_at(
-            report, initial_index, state["image_size"]
-        )
+        if report["samples"]:
+            try:
+                original, processed, information, initial_index = _preview_at(
+                    report,
+                    initial_index,
+                    state["image_size"],
+                    state["resize_enabled"],
+                )
+            except Exception as error:
+                if verify_image_content:
+                    raise
+                original = processed = None
+                information = f"样本预览不可用：{error}"
+        else:
+            original = processed = None
+            information = "没有可预览的有效样本。"
+        report_progress(0.995, "生成样本预览")
         state["sample_index"] = initial_index
+        report_progress(1.0, "数据集导入与检查完成")
         return (
             state,
             initial_index,
@@ -1277,6 +1646,8 @@ def inspect_dataset_ui(
             gr.update(visible=inspection.can_train),
         )
     except Exception as error:
+        if progress_callback is not None:
+            progress_callback(1.0, f"导入或检查失败：{error}")
         return (
             None,
             0,
@@ -1298,8 +1669,18 @@ def turn_sample(
     if not state:
         return None, None, "请先检查数据集。", 0
     report = state["report"]
+    if not report.get("samples"):
+        return None, None, "没有可预览的有效样本。", 0
     index = int(sample_index) + direction
-    original, processed, information, index = _preview_at(report, index, state["image_size"])
+    try:
+        original, processed, information, index = _preview_at(
+            report,
+            index,
+            state["image_size"],
+            state.get("resize_enabled", True),
+        )
+    except Exception as error:
+        return None, None, f"样本预览不可用：{error}", index
     state["sample_index"] = index
     return original, processed, information, index
 
@@ -1452,7 +1833,7 @@ def start_training(
     data_format: str,
     validation_fraction: float,
     seed: float,
-    image_size: float,
+    image_size: float | None,
     accept_warnings: bool,
     model_name: str,
     epochs: float,
@@ -1461,6 +1842,10 @@ def start_training(
     device: str,
     augmentation_enabled: bool = False,
     progress: gr.Progress = gr.Progress(track_tqdm=False),
+    *,
+    reserved_task_id: str | None = None,
+    resize_enabled: bool = True,
+    num_workers: float = 0,
 ) -> Iterator[tuple[Any, ...]]:
     started_at = time.perf_counter()
     logs: deque[str] = deque(maxlen=200)
@@ -1468,7 +1853,8 @@ def start_training(
     stdout_queue: queue.Queue[str] = queue.Queue(maxsize=2000)
     experiment_path: Path | None = None
     log_path: Path | None = None
-    resource_sampler = HardwareResourceSampler()
+    resource_sampler: HardwareResourceSampler | None = None
+    process: subprocess.Popen[str] | None = None
     current_epoch = "-"
     current_batch = "尚未计算"
     current_train_loss = "尚未计算"
@@ -1482,14 +1868,14 @@ def start_training(
     metric_updated_at = "尚未计算"
     evaluation_report: dict[str, Any] = {}
     model_file: str | None = None
-    task_id: str | None = None
+    task_id: str | None = reserved_task_id
     loss_rows: list[dict[str, Any]] = []
     metric_rows: list[dict[str, Any]] = []
     learning_rate_rows: list[dict[str, Any]] = []
     primary_key = "accuracy" if task == "classification" else "micro_f1"
     completed_primary_values: list[tuple[int, float]] = []
     initial_values: tuple[Any, ...] = (
-        "检查并准备数据集",
+        "训练请求已提交，正在准备配置",
         0,
         "-",
         "尚未计算",
@@ -1511,9 +1897,9 @@ def start_training(
         "",
         "",
         {},
-        _safe_resource_text(resource_sampler),
+        "训练进程启动后读取资源状态",
         None,
-        "",
+        task_id or "",
     )
 
     def changes_tuple(changes: dict[int, Any]) -> tuple[Any, ...]:
@@ -1545,56 +1931,72 @@ def start_training(
             raise ValueError("Learning Rate 必须是大于 0 的有限数值。")
         if task not in {"classification", "multi_label"}:
             raise ValueError("请选择有效的任务类型。")
+        resolved_image_size = _normalize_image_size(image_size, resize_enabled)
+        if (
+            isinstance(seed, bool)
+            or not isinstance(seed, (int, float))
+            or not math.isfinite(seed)
+            or not float(seed).is_integer()
+            or seed < 0
+        ):
+            raise ValueError("随机种子必须是非负整数。")
+        if (
+            isinstance(validation_fraction, bool)
+            or not isinstance(validation_fraction, (int, float))
+            or not math.isfinite(validation_fraction)
+            or not 0 < validation_fraction < 1
+        ):
+            raise ValueError("验证集比例必须大于 0 且小于 1。")
+        if (
+            isinstance(num_workers, bool)
+            or not isinstance(num_workers, (int, float))
+            or not math.isfinite(num_workers)
+            or not float(num_workers).is_integer()
+            or num_workers < 0
+            or num_workers > 16
+        ):
+            raise ValueError("DataLoader workers 必须是 0 到 16 之间的整数。")
         if dataset_state is None:
-            raise ValueError("请先导入并检查数据集，再启动训练。")
+            raise ValueError("请先导入数据集，再启动训练。")
         expected_settings = {
             "task": task,
             "format": data_format,
             "validation_fraction": float(validation_fraction),
             "seed": int(seed),
-            "image_size": int(image_size),
+            "image_size": resolved_image_size,
+            "resize_enabled": resize_enabled,
         }
         if any(dataset_state.get(key) != value for key, value in expected_settings.items()):
-            raise ValueError("数据集或划分设置已更改，请重新检查数据集后再训练。")
+            raise ValueError("数据集设置已更改，请重新导入数据集后再训练。")
         expected_source = "zip" if upload_path else "local"
         if dataset_state.get("source") != expected_source:
-            raise ValueError("数据集来源已更改，请重新检查数据集后再训练。")
-        progress(0, desc="检查并准备数据集")
-        inspection, fresh_report, fresh_state = _inspect_selected_dataset(
-            upload_path,
-            local_path,
-            task,
-            data_format,
-            validation_fraction,
-            seed,
-            image_size,
-        )
-        if fresh_state["fingerprint"] != dataset_state.get("fingerprint"):
-            raise ValueError("数据集内容或检查结果已变化，请重新检查并确认数据集。")
-        if fresh_report["errors"]:
+            raise ValueError("数据集来源已更改，请重新导入数据集后再训练。")
+        report = dataset_state.get("report")
+        if not isinstance(report, dict):
+            raise ValueError("数据集导入状态无效，请重新导入数据集。")
+        if report.get("errors"):
             raise ValueError(
-                "数据集存在阻断性错误，不能启动训练：\n" + "\n".join(fresh_report["errors"])
+                "数据集存在阻断性错误，不能启动训练：\n" + "\n".join(report["errors"])
             )
-        if fresh_report["warnings"] and not accept_warnings:
+        if report.get("warnings") and not accept_warnings:
             raise ValueError("检查报告包含警告。请阅读报告并勾选确认后再启动训练。")
-        if not inspection.can_train:
-            raise ValueError("数据集未通过检查，不能启动训练。")
+        if not report.get("can_train"):
+            raise ValueError("数据集未通过导入检查，不能启动训练。")
 
         active_task = get_latest_task(OUTPUT_ROOT)
         if active_task and active_task.get("status") in ACTIVE_STATUSES:
-            task_id = str(active_task["task_id"])
             raise ValueError(
-                f"已有训练任务 {task_id} 处于 {active_task['status']} 状态；"
+                f"已有训练任务 {active_task['task_id']} 处于 {active_task['status']} 状态；"
                 "请等待其结束或请求停止。"
             )
 
-        dataset_path = (
-            Path(fresh_report["annotation_csv"])
-            if data_format in {"csv_classification", "csv_multilabel"}
-            else inspection.path
-        )
-        run_id = uuid.uuid4().hex
+        run_id = task_id or uuid.uuid4().hex
         task_id = run_id
+        dataset_path = (
+            Path(report["annotation_csv"])
+            if data_format in {"csv_classification", "csv_multilabel"}
+            else Path(report["path"])
+        )
         config_path = CONFIG_ROOT / f"{run_id}.yaml"
         events_path = CONFIG_ROOT / f"{run_id}.events.jsonl"
         CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1609,17 +2011,24 @@ def start_training(
             data_format=data_format,
             validation_fraction=float(validation_fraction),
             seed=int(seed),
-            image_size=int(image_size),
-            image_root=fresh_report["image_root"]
+            image_size=resolved_image_size,
+            image_root=report["image_root"]
             if data_format in {"csv_classification", "csv_multilabel"}
             else None,
             augmentation_enabled=augmentation_enabled,
+            resize_enabled=resize_enabled,
+            num_workers=int(num_workers),
         )
+        config = resolve_config(config)
         config_path.write_text(
             yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
         events_path.write_text("", encoding="utf-8")
-        initial_values = (*initial_values[:-1], task_id)
+        initial_values = (
+            *initial_values[:24],
+            task_id,
+        )
+        initial_values = ("正在启动独立训练进程", *initial_values[1:])
         yield initial_values
 
         command = [
@@ -1633,6 +2042,7 @@ def start_training(
             "--task-id",
             task_id,
         ]
+        # Keep Ctrl+C in the UI console from interrupting the training CLI.
         process = subprocess.Popen(
             command,
             cwd=PROJECT_ROOT,
@@ -1643,8 +2053,10 @@ def start_training(
             errors="replace",
             bufsize=1,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
-        progress(0, desc="启动训练")
+        resource_sampler = HardwareResourceSampler()
+        progress(0.08, desc="启动训练")
         assert process.stdout is not None
 
         def read_process_output() -> None:
@@ -1724,7 +2136,7 @@ def start_training(
                             log_path = experiment_path / "logs" / "train.log"
                             changes.update(
                                 {
-                                    0: "准备训练组件",
+                                    0: "正在准备数据集与模型",
                                     18: str(log_path),
                                 }
                             )
@@ -1770,7 +2182,7 @@ def start_training(
                                 )
                             )
                             progress(
-                                overall_progress,
+                                0.08 + overall_progress * 0.92,
                                 desc=f"{stage_label} | Epoch {current_epoch} | Batch {current_batch}",
                             )
                             should_yield = True
@@ -1896,6 +2308,10 @@ def start_training(
                             changes[22] = _safe_resource_text(resource_sampler)
                         except Exception:
                             changes[22] = "资源监控暂不可用。训练将继续运行。"
+                        if current_epoch == "-":
+                            changes[0] = "正在准备数据集与模型"
+                            changes[4] = _format_duration(now - started_at)
+                            changes[5] = "尚未计算"
                         last_resource_at = now
                         should_yield = True
 
@@ -2027,6 +2443,8 @@ def start_training(
         }
         yield changes_tuple(completed_changes)
     except Exception as error:
+        if process is None:
+            task_id = None
         details = traceback.format_exc()
         summary = (
             str(error)
@@ -2042,7 +2460,7 @@ def start_training(
                 20: details,
                 22: _safe_resource_text(resource_sampler),
                 23: model_file,
-                24: task_id,
+                24: task_id or "",
             }
         )
     finally:
@@ -2054,12 +2472,20 @@ def start_training(
                 pass
 
 
-def _preprocessing_summary(image_size: float) -> str:
-    size = int(image_size)
-    pipeline = (
-        f"Resize ({size} × {size}) → RGB Tensor → Normalize "
-        "(mean 0.485/0.456/0.406, std 0.229/0.224/0.225)"
-    )
+def _preprocessing_summary(
+    image_size: float | None, resize_enabled: bool = True
+) -> str:
+    if not resize_enabled:
+        pipeline = "保持原始尺寸 → RGB Tensor → Normalize；卷积模型批次会按需补边"
+    else:
+        try:
+            size = _normalize_image_size(image_size, True)
+        except ValueError as error:
+            return f"训练预处理尚未配置：{error}"
+        pipeline = (
+            f"Resize ({size} × {size}) → RGB Tensor → Normalize "
+            "(mean 0.485/0.456/0.406, std 0.229/0.224/0.225)"
+        )
     return f"训练预处理：{pipeline}  \n验证预处理：{pipeline}"
 
 

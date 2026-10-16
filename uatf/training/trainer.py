@@ -429,8 +429,8 @@ class Trainer:
                 )
 
             try:
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
+                inputs = inputs.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
 
                 with self._autocast_context():
                     try:
@@ -1071,16 +1071,15 @@ class Trainer:
             return False
         saved_dataset = saved.get("dataset")
         current_dataset = current.get("dataset")
-        if (
-            isinstance(saved_dataset, Mapping)
-            and isinstance(current_dataset, Mapping)
-            and "augmentation" not in saved_dataset
-        ):
+        if isinstance(saved_dataset, Mapping) and isinstance(current_dataset, Mapping):
             legacy_current = dict(current)
             legacy_dataset = dict(current_dataset)
-            legacy_dataset.pop("augmentation", None)
+            for optional_setting in ("augmentation", "resize_enabled"):
+                if optional_setting not in saved_dataset:
+                    legacy_dataset.pop(optional_setting, None)
             legacy_current["dataset"] = legacy_dataset
-            return saved == legacy_current
+            if saved == legacy_current:
+                return True
         return False
 
     def resume(self, checkpoint_path: str | Path | None = None) -> int:

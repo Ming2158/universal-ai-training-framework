@@ -17,7 +17,9 @@ from app import app as gui_app
 from uatf import __version__
 from uatf.api import run_training
 from uatf.cli import main
+from uatf.evaluation import evaluate_model_asset
 from uatf.experiments import get_experiment, list_experiments, list_model_assets
+from uatf.inference import predict_model_asset_directory
 from uatf.models.factory import MODEL_REGISTRY
 from uatf.tasks import TaskManager, get_latest_task, get_task
 
@@ -25,6 +27,15 @@ from uatf.tasks import TaskManager, get_latest_task, get_task
 def _build_tiny_model(output_count: int, pretrained: bool) -> nn.Module:
     assert pretrained is False
     return nn.Sequential(nn.Flatten(), nn.Linear(3 * 16 * 16, output_count))
+
+
+def _build_variable_image_model(output_count: int, pretrained: bool) -> nn.Module:
+    assert pretrained is False
+    return nn.Sequential(
+        nn.AdaptiveAvgPool2d((16, 16)),
+        nn.Flatten(),
+        nn.Linear(3 * 16 * 16, output_count),
+    )
 
 
 class _SubprocessTinyModel(nn.Module):
@@ -266,6 +277,132 @@ def test_folder_dataset_with_explicit_train_and_validation_directories_is_record
     assert record["dataset"]["train_samples"] == 2
     assert record["dataset"]["validation_samples"] == 2
     assert record["dataset"]["validation_path"] == str(validation_dir.resolve())
+
+
+def test_no_resize_training_evaluation_and_batch_inference_support_variable_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(MODEL_REGISTRY, "test_variable_image", _build_variable_image_model)
+    dataset_dir = tmp_path / "train-images"
+    for class_name, color in (("blue", (0, 0, 220)), ("red", (220, 0, 0))):
+        for index, size in enumerate(((16, 12), (24, 32), (40, 24), (32, 40))):
+            path = dataset_dir / class_name / f"{index}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", size, color).save(path)
+
+    experiment_dir = run_training(
+        {
+            "dataset": {
+                "path": str(dataset_dir),
+                "validation_fraction": 0.25,
+                "image_size": 224,
+                "resize_enabled": False,
+            },
+            "model": {"name": "test_variable_image", "pretrained": False},
+            "training": {"epochs": 1, "batch_size": 2, "device": "cpu"},
+            "output": {
+                "directory": str(tmp_path / "variable-runs"),
+                "save_predictions": False,
+                "save_plots": False,
+            },
+        }
+    )
+    root = experiment_dir.parent
+    asset = list_model_assets(root)[0]
+
+    evaluation_dir = tmp_path / "evaluation-images"
+    prediction_dir = tmp_path / "prediction-images"
+    for class_name, color in (("blue", (10, 30, 200)), ("red", (200, 30, 10))):
+        class_directory = evaluation_dir / class_name
+        class_directory.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (18, 33), color).save(class_directory / "one.png")
+        Image.new("RGB", (45, 20), color).save(class_directory / "two.png")
+    prediction_dir.mkdir()
+    Image.new("RGB", (18, 33), (10, 30, 200)).save(prediction_dir / "one.png")
+    Image.new("RGB", (45, 20), (200, 30, 10)).save(prediction_dir / "two.png")
+
+    evaluation = evaluate_model_asset(
+        root,
+        asset["id"],
+        evaluation_dir,
+        batch_size=2,
+        device="cpu",
+    )
+    predictions, _ = predict_model_asset_directory(
+        root,
+        asset["id"],
+        prediction_dir,
+        batch_size=2,
+        device="cpu",
+    )
+    saved_config = yaml.safe_load((experiment_dir / "config.yaml").read_text(encoding="utf-8"))
+
+    assert saved_config["dataset"]["resize_enabled"] is False
+    assert evaluation.metrics["sample_count"] == 4
+    assert predictions.sample_ids == ["one.png", "two.png"]
+
+
+def test_workspace_start_training_callback_runs_cli_and_persists_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_dir = tmp_path / "workspace-dataset"
+    for class_name, color in (("blue", (0, 0, 220)), ("red", (220, 0, 0))):
+        for index, size in enumerate(((32, 32), (40, 32), (32, 48), (48, 40))):
+            path = dataset_dir / class_name / f"{index}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", size, color).save(path)
+
+    output_root = tmp_path / "workspace-runs"
+    monkeypatch.setattr(gui_app, "OUTPUT_ROOT", output_root)
+    monkeypatch.setattr(gui_app, "CONFIG_ROOT", tmp_path / "workspace-configs")
+    monkeypatch.setattr(gui_app, "DATASET_ROOT", tmp_path / "workspace-ui-datasets")
+    monkeypatch.setattr(gui_app, "DATASET_REGISTRY", tmp_path / "workspace-registry")
+    inspection = gui_app.inspect_dataset_ui(
+        None,
+        str(dataset_dir),
+        "classification",
+        "image_folder",
+        0.25,
+        17,
+        224,
+        resize_enabled=False,
+    )
+    dataset_state = inspection[0]
+    assert dataset_state and dataset_state["report"]["can_train"]
+
+    routed = gui_app.start_training_for_ui(
+        None,
+        str(dataset_dir),
+        dataset_state,
+        "classification",
+        "image_folder",
+        0.25,
+        17,
+        224,
+        False,
+        True,
+        "resnet50",
+        1,
+        2,
+        0.0001,
+        "cpu",
+        False,
+        0,
+    )
+    task_id = routed[24]
+    assert task_id, (routed[0], routed[19], routed[20])
+    assert routed[25]["value"] == "训练监控"
+
+    deadline = time.monotonic() + 60
+    while gui_app.ui_training_is_active(task_id) and time.monotonic() < deadline:
+        time.sleep(0.25)
+    final_state = gui_app.poll_training_for_ui(task_id)
+    task_record = get_task(output_root, task_id)
+
+    assert not gui_app.ui_training_is_active(task_id)
+    assert final_state[0] == "训练完成"
+    assert task_record["status"] == "Completed"
+    assert Path(task_record["result_directory"], "best_model.pth").is_file()
 
 
 def test_python_api_stop_persists_stopped_status_and_last_checkpoint(

@@ -145,6 +145,22 @@ def test_validate_config_rejects_task_incompatible_loss_and_model_input_size() -
             }
         )
 
+    with pytest.raises(ValueError, match="requires fixed-size image resizing"):
+        validate_config(
+            {
+                "dataset": {"path": "unused-dataset", "resize_enabled": False},
+                "model": {"name": "vit"},
+            }
+        )
+
+    convolution_config = validate_config(
+        {
+            "dataset": {"path": "unused-dataset", "resize_enabled": False},
+            "model": {"name": "resnet50"},
+        }
+    )
+    assert convolution_config["dataset"]["resize_enabled"] is False
+
     with pytest.raises(ValueError, match="requires dataset.image_size 224 x 224"):
         validate_config(
             {

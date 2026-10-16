@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from errno import EACCES, EAGAIN
 from pathlib import Path
 from typing import Any, Literal
 
@@ -58,7 +60,15 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    for attempt in range(3):
+        try:
+            content = path.read_text(encoding="utf-8")
+            break
+        except PermissionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+    value = json.loads(content)
     if not isinstance(value, dict):
         raise ValueError(f"Invalid task record: {path}")
     return value
@@ -78,6 +88,63 @@ def _pid_is_alive(pid: Any) -> bool:
             return False
         return True
     return True
+
+
+def _os_lock_is_held(lock_path: Path) -> bool | None:
+    try:
+        lock_file = lock_path.open("r+b")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+    acquired = False
+    try:
+        lock_file.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+            return False
+        except OSError as error:
+            if os.name == "nt" or isinstance(error, BlockingIOError):
+                return True
+            if error.errno in {EACCES, EAGAIN}:
+                return True
+            return None
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+        else:
+            lock_file.close()
+
+
+def _task_lock_is_held(output_directory: str | Path, task_id: str) -> bool | None:
+    """Check the task-specific lock instead of trusting a reusable PID."""
+    task_lock = (
+        Path(output_directory).expanduser().resolve()
+        / ".uatf"
+        / "tasks"
+        / f"{task_id}.running.lock"
+    )
+    return _os_lock_is_held(task_lock)
 
 
 @contextmanager
@@ -110,7 +177,7 @@ def _record_lock(path: Path) -> Iterator[None]:
 
 
 class TaskManager:
-    """Persist one task record and hold an output-root-scoped process lock."""
+    """Persist one task and hold output-root and task-specific process locks."""
 
     def __init__(
         self,
@@ -129,9 +196,12 @@ class TaskManager:
         self.record_path = self.tasks_directory / f"{self.task_id}.json"
         self.stop_path = self.tasks_directory / f"{self.task_id}.stop"
         self.record_lock_path = self.tasks_directory / f"{self.task_id}.lock"
+        self.running_lock_path = self.tasks_directory / f"{self.task_id}.running.lock"
         self.lock_path = self.metadata_directory / "active-task.lock"
         self._owns_lock = False
+        self._owns_running_lock = False
         self._lock_file: Any = None
+        self._running_lock_file: Any = None
 
     def acquire(self) -> None:
         self.tasks_directory.mkdir(parents=True, exist_ok=True)
@@ -164,6 +234,32 @@ class TaskManager:
             lock_file.truncate()
             lock_file.write(json.dumps(lock_record).encode("utf-8") + b"\n")
             lock_file.flush()
+
+            running_lock_file = self.running_lock_path.open("a+b")
+            try:
+                running_lock_file.seek(0, os.SEEK_END)
+                if running_lock_file.tell() == 0:
+                    running_lock_file.write(b"\0")
+                    running_lock_file.flush()
+                running_lock_file.seek(0)
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(running_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(
+                            running_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                        )
+                except OSError as error:
+                    raise self._already_running(error) from error
+            except BaseException:
+                running_lock_file.close()
+                raise
+            self._running_lock_file = running_lock_file
+            self._owns_running_lock = True
         except BaseException:
             if self._owns_lock:
                 self.release()
@@ -202,6 +298,24 @@ class TaskManager:
             raise
 
     def release(self) -> None:
+        if self._owns_running_lock:
+            self._owns_running_lock = False
+            running_lock_file, self._running_lock_file = self._running_lock_file, None
+            if running_lock_file is not None:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        running_lock_file.seek(0)
+                        msvcrt.locking(
+                            running_lock_file.fileno(), msvcrt.LK_UNLCK, 1
+                        )
+                    else:
+                        import fcntl
+
+                        fcntl.flock(running_lock_file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    running_lock_file.close()
         if not self._owns_lock:
             return
         self._owns_lock = False
@@ -350,11 +464,27 @@ def get_task(
 ) -> dict[str, Any]:
     root, path = _record_for_directory(output_directory, task_id)
     record = _read_json(path)
-    if (
-        reconcile_interruption
-        and record.get("status") in ACTIVE_STATUSES
-        and not _pid_is_alive(record.get("process_id"))
-    ):
+    if reconcile_interruption and record.get("status") in ACTIVE_STATUSES:
+        lock_held = _task_lock_is_held(output_directory, task_id)
+        if lock_held is True:
+            process_active = True
+        elif lock_held is False:
+            legacy_lock_held = _os_lock_is_held(root / "active-task.lock")
+            try:
+                latest_task_id = _read_json(root / "latest-task.json").get("task_id")
+            except (OSError, json.JSONDecodeError, ValueError):
+                latest_task_id = None
+            if legacy_lock_held is True:
+                process_active = latest_task_id == task_id
+            elif legacy_lock_held is False:
+                process_active = False
+            else:
+                process_active = _pid_is_alive(record.get("process_id"))
+        else:
+            process_active = _pid_is_alive(record.get("process_id"))
+    else:
+        process_active = True
+    if reconcile_interruption and record.get("status") in ACTIVE_STATUSES and not process_active:
         manager = TaskManager(output_directory, task_id, process_id=record.get("process_id"))
         record = manager.update(
             "Failed",

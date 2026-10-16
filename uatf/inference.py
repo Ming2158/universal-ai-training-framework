@@ -11,13 +11,15 @@ from typing import Any
 import torch
 from PIL import Image, UnidentifiedImageError
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from uatf.data import (
     CsvImageClassificationDataset,
     CsvMultiLabelDataset,
     ImageFolderDataset,
     build_image_transform,
+    collate_image_batch,
+    collate_unlabeled_image_batch,
 )
 from uatf.data.datasets import IMAGE_EXTENSIONS, DatasetValidationError
 from uatf.evaluation.evaluator import ModelPredictions, predict_model
@@ -45,6 +47,7 @@ def asset_inference_context(output_directory: str | Path, asset_id: str) -> dict
     if task == "multi_label" and dataset_config.get("format") != "csv_multilabel":
         raise ValueError("Multi-label model assets must use the csv_multilabel dataset format.")
     image_size = dataset_config.get("image_size")
+    resize_enabled = dataset_config.get("resize_enabled", True)
     mean = dataset_config.get("mean")
     std = dataset_config.get("std")
     if image_size is None or mean is None or std is None:
@@ -59,7 +62,12 @@ def asset_inference_context(output_directory: str | Path, asset_id: str) -> dict
     ):
         raise ValueError("Model asset mean and std must contain three finite RGB values; std must be positive.")
     try:
-        transform = build_image_transform(image_size=image_size, mean=mean, std=std)
+        transform = build_image_transform(
+            image_size=image_size,
+            mean=mean,
+            std=std,
+            resize_enabled=resize_enabled,
+        )
     except (TypeError, ValueError) as error:
         raise ValueError(f"Model asset preprocessing configuration is invalid: {error}") from error
     return {
@@ -67,7 +75,13 @@ def asset_inference_context(output_directory: str | Path, asset_id: str) -> dict
         "task": task,
         "class_names": list(class_names),
         "transform": transform,
-        "preprocessing": {key: dataset_config[key] for key in ("image_size", "mean", "std")},
+        "resize_enabled": resize_enabled,
+        "preprocessing": {
+            "image_size": image_size,
+            "resize_enabled": resize_enabled,
+            "mean": mean,
+            "std": std,
+        },
     }
 
 
@@ -135,7 +149,13 @@ def create_evaluation_loader(
                 label_columns=names,
             )
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=None if context["resize_enabled"] else collate_image_batch,
+    )
     return loader, {
         "path": str(path),
         "format": selected_format,
@@ -270,8 +290,6 @@ def predict_model_asset_image(
             tensor = context["transform"](source.convert("RGB"))
     except (OSError, SyntaxError, ValueError, UnidentifiedImageError) as error:
         raise DatasetValidationError(f"Could not read image: {path}") from error
-    from torch.utils.data import TensorDataset
-
     result = predict_model(
         context["model"],
         DataLoader(TensorDataset(tensor.unsqueeze(0)), batch_size=1),
@@ -325,7 +343,13 @@ def predict_model_asset_directory(
         raise ValueError("batch_size must be a positive integer.")
     context = asset_inference_context(output_directory, asset_id)
     dataset = ImageDirectoryDataset(image_directory, context["transform"])
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=None if context["resize_enabled"] else collate_unlabeled_image_batch,
+    )
     result = predict_model(
         context["model"],
         loader,

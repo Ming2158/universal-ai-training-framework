@@ -126,7 +126,13 @@ def _adapter(
         normalization_std=_IMAGENET_STD,
         classifier_head=classifier_head,
         checkpoint_format="PyTorch state_dict and UATF training checkpoint",
-        inference_config=("dataset.image_size", "dataset.mean", "dataset.std", "evaluation.threshold"),
+        inference_config=(
+            "dataset.image_size",
+            "dataset.resize_enabled",
+            "dataset.mean",
+            "dataset.std",
+            "evaluation.threshold",
+        ),
         limitations=limitations,
     )
 

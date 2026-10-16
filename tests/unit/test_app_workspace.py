@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import uuid
+from pathlib import Path
+
 from app import app
+from uatf.tasks import TaskManager
 
 
 def test_workspace_theme_uses_uatf_neutral_surfaces() -> None:
@@ -71,66 +75,112 @@ def test_empty_state_components_have_unique_stable_style_targets() -> None:
     assert ".uatf-empty-state" not in app.WORKSPACE_CSS
 
 
-def test_training_route_opens_monitor_only_after_a_task_id_exists(
-    monkeypatch,
-) -> None:
-    task_result = ("尚未计算",) * 24 + ("task-123",)
-    monkeypatch.setattr(app, "start_training", lambda *args: iter([task_result]))
+def test_preprocessing_summary_supports_disabled_resize_and_missing_size() -> None:
+    assert "保持原始尺寸" in app._preprocessing_summary(None, False)
+    assert "尚未配置" in app._preprocessing_summary(None, True)
 
-    routed = next(
-        app.start_training_for_ui(
-            None,
-            None,
-            None,
-            "classification",
-            "image_folder",
-            0.2,
-            42,
-            224,
-            False,
-            "resnet50",
-            3,
-            8,
-            0.001,
-            "cpu",
-            False,
-        )
+
+def test_dataloader_worker_control_accepts_zero_workers() -> None:
+    configuration = app.build_app().get_config_file()
+    workers = next(
+        component["props"]
+        for component in configuration["components"]
+        if component.get("props", {}).get("label") == "DataLoader workers"
     )
 
-    assert len(routed) == 25 + 1 + len(app.WORKSPACE_PAGES) + 1
+    assert workers["minimum"] == 0
+    assert workers["minimum"] <= workers["value"] <= workers["maximum"]
+
+
+def test_training_monitor_restores_persisted_task_after_ui_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    task_id = f"restored-{uuid.uuid4().hex}"
+    output_root = tmp_path / "runs"
+    manager = TaskManager(output_root, task_id, process_id=2_000_000_000)
+    manager.acquire()
+    try:
+        manager.update("Preparing")
+        manager.set_experiment_directory(tmp_path / "experiment")
+        manager.set_stage("training", epoch=2, total_epochs=5)
+        monkeypatch.setattr(app, "OUTPUT_ROOT", output_root)
+        monkeypatch.setattr(app, "UI_TRAINING_STATE", {})
+
+        restored = app.poll_training_for_ui(task_id)
+    finally:
+        manager.release()
+
+    assert "训练中" in restored[0]
+    assert restored[2] == "2 / 5"
+    assert restored[24] == task_id
+    assert restored[-2]["interactive"] is True
+    assert restored[-1]["active"] is True
+
+
+def test_training_route_opens_monitor_only_after_a_task_id_exists(monkeypatch) -> None:
+    def valid_training_update(*_args, **kwargs):
+        values = ["尚未计算"] * 25
+        values[19] = ""
+        values[24] = kwargs["reserved_task_id"]
+        return iter([tuple(values)])
+
+    monkeypatch.setattr(app, "start_training", valid_training_update)
+
+    routed = app.start_training_for_ui(
+        None,
+        None,
+        None,
+        "classification",
+        "image_folder",
+        0.2,
+        42,
+        224,
+        True,
+        False,
+        "resnet50",
+        3,
+        8,
+        0.001,
+        "cpu",
+        False,
+    )
+
+    assert len(routed) == 25 + 1 + len(app.WORKSPACE_PAGES) + 2
     assert routed[25]["value"] == "训练监控"
     assert [item.get("visible") for item in routed[26 : 26 + len(app.WORKSPACE_PAGES)]] == [
         page == "训练监控" for page in app.WORKSPACE_PAGES
     ]
-    assert routed[-1]["interactive"] is False
+    assert routed[-2]["interactive"] is True
+    assert routed[-1]["active"] is True
 
-    validation_failure = ("请先检查数据集",) * 24 + ("",)
+    validation_failure = ("尚未计算",) * 19 + ("无效数据集", "", {}, "等待后台训练状态", None, "")
     monkeypatch.setattr(
         app,
         "start_training",
-        lambda *args: iter([validation_failure]),
+        lambda *args, **kwargs: iter([validation_failure]),
     )
-    not_routed = next(
-        app.start_training_for_ui(
-            None,
-            None,
-            None,
-            "classification",
-            "image_folder",
-            0.2,
-            42,
-            224,
-            False,
-            "resnet50",
-            3,
-            8,
-            0.001,
-            "cpu",
-            False,
-        )
+    not_routed = app.start_training_for_ui(
+        None,
+        None,
+        None,
+        "classification",
+        "image_folder",
+        0.2,
+        42,
+        224,
+        True,
+        False,
+        "resnet50",
+        3,
+        8,
+        0.001,
+        "cpu",
+        False,
     )
-    assert not_routed[25].get("value") is None
-    assert all(item.get("visible") is None for item in not_routed[26:])
+    assert not_routed[24] == ""
+    assert all(item.get("visible") is None for item in not_routed[26 : 26 + len(app.WORKSPACE_PAGES)])
+    assert not_routed[-2]["interactive"] is False
+    assert not_routed[-1]["active"] is False
 
 
 def test_copied_configuration_reports_that_monitor_state_needs_refresh(

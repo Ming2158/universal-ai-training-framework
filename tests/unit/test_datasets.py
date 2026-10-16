@@ -50,6 +50,32 @@ def test_image_folder_dataset_and_transform_return_tensor_sample(tmp_path: Path)
     assert label.dtype == torch.long
 
 
+def test_resize_can_be_disabled_and_variable_images_are_padded_per_batch(tmp_path: Path) -> None:
+    for class_name in ("cats", "dogs"):
+        for index, size in enumerate(((12, 8), (40, 24))):
+            path = tmp_path / class_name / f"{index}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", size, (40, 90, 140)).save(path)
+
+    dataset = ImageFolderDataset(
+        tmp_path,
+        transform=build_image_transform(resize_enabled=False),
+    )
+    train_loader, _, _ = create_data_loaders(
+        dataset,
+        batch_size=4,
+        validation_fraction=0,
+        seed=9,
+        pad_variable_images=True,
+    )
+    images, labels = next(iter(train_loader))
+
+    assert dataset[0][0].shape in {(3, 8, 12), (3, 24, 40)}
+    assert images.shape == (4, 3, 32, 64)
+    assert labels.shape == (4,)
+    assert labels.dtype == torch.long
+
+
 def test_single_label_csv_dataset_and_batch_shapes(tmp_path: Path) -> None:
     save_image(tmp_path / "one.png")
     save_image(tmp_path / "two.png")

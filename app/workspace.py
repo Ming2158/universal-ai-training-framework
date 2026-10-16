@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 from typing import Any
 
 import gradio as gr
 
+from uatf import __version__
 from uatf.models import MODEL_REGISTRY, get_model_adapters
 
 
@@ -40,14 +43,108 @@ def build_app(backend: Any) -> gr.Blocks:
         frame, model_selection, inference_selection = backend.refresh_model_asset_browser()
         return compact_frame(frame, model_columns), model_selection, inference_selection
 
-    def inspect_dataset(*inputs: Any) -> tuple[Any, ...]:
-        result = backend.inspect_dataset_ui(*inputs)
+    def inspect_dataset(
+        upload_path: str | None,
+        local_path: str | None,
+        task: str,
+        data_format: str,
+        validation_fraction: float,
+        seed: float,
+        image_size: float | None,
+        resize_enabled: bool,
+        verify_image_content: bool,
+    ) -> Any:
+        updates: queue.Queue[tuple[float | None, str]] = queue.Queue(maxsize=1)
+        outcome: dict[str, Any] = {}
+        finished = threading.Event()
+
+        def report_progress(fraction: float | None, description: str) -> None:
+            backend._offer_latest(updates, (fraction, description))
+
+        def run_import() -> None:
+            try:
+                outcome["result"] = backend.inspect_dataset_ui(
+                    upload_path,
+                    local_path,
+                    task,
+                    data_format,
+                    validation_fraction,
+                    seed,
+                    image_size,
+                    progress_callback=report_progress,
+                    verify_image_content=verify_image_content,
+                    resize_enabled=resize_enabled,
+                )
+            except Exception as error:
+                outcome["error"] = error
+            finally:
+                finished.set()
+
+        skip_outputs = tuple(gr.skip() for _ in range(len(inspect_outputs) - 1))
+        yield (
+            *skip_outputs,
+            backend._progress_bar_html(None, "准备读取数据集", title="数据集导入与检查"),
+        )
+        worker = threading.Thread(target=run_import, name="uatf-dataset-import", daemon=True)
+        worker.start()
+        while not finished.is_set() or not updates.empty():
+            try:
+                fraction, description = updates.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            yield (
+                *skip_outputs,
+                backend._progress_bar_html(
+                    fraction,
+                    description,
+                    title="数据集导入与检查",
+                    state="error" if "失败" in description else "running",
+                ),
+            )
+
+        if "error" in outcome:
+            error = outcome["error"]
+            result = (
+                None,
+                0,
+                f"数据集导入/检查失败：{error}",
+                {"status": "blocked", "errors": [str(error)]},
+                [],
+                None,
+                None,
+                None,
+                "",
+                gr.update(value=False),
+                gr.update(visible=False),
+            )
+        else:
+            result = outcome["result"]
         state = result[0]
         can_train = bool(state and state.get("report", {}).get("status") in {"ready", "warning"})
-        return (
+        report_status = state.get("report", {}).get("status") if state else None
+        completion_text = (
+            "导入与检查完成"
+            if report_status in {"ready", "warning"}
+            else "导入完成，发现阻断错误"
+            if report_status == "blocked"
+            else f"数据集导入/检查失败：{result[2]}"
+        )
+        if state and not state.get("report", {}).get("image_content_verified", True):
+            completion_text = (
+                "导入完成，发现阻断错误；未逐张验证图片内容"
+                if report_status == "blocked"
+                else "导入完成，未逐张验证图片内容"
+            )
+        yield (
             *result,
             gr.update(visible=True),
             gr.update(visible=not can_train),
+            backend._progress_bar_html(
+                1.0,
+                completion_text,
+                title="数据集导入与检查",
+                state="error" if not can_train else "running",
+            ),
         )
 
     def open_experiment_details(experiment_id: str | None) -> tuple[Any, ...]:
@@ -136,7 +233,14 @@ def build_app(backend: Any) -> gr.Blocks:
                 )
         else:
             resource_state = gr.update(value="任务已结束，运行时资源采样已停止。")
-        return (*result, resource_state, stop_enabled(selected_task or None))
+        return (
+            *result,
+            resource_state,
+            stop_enabled(selected_task or None),
+            gr.update(
+                active=bool(record and record.get("status") in backend.ACTIVE_STATUSES)
+            ),
+        )
 
     def request_stop(task_id: str | None) -> tuple[str, dict[str, Any]]:
         return backend.request_training_stop(task_id), gr.update(interactive=False)
@@ -161,7 +265,7 @@ def build_app(backend: Any) -> gr.Blocks:
                     show_label=False,
                 )
                 gr.Markdown(
-                    "V2.0.0  ·  本地训练",
+                    f"V{__version__}  ·  本地训练",
                     elem_id="uatf-version",
                 )
 
@@ -249,11 +353,27 @@ def build_app(backend: Any) -> gr.Blocks:
                                 minimum=1,
                                 label="缩放尺寸",
                             )
+                            resize_enabled = gr.Checkbox(
+                                value=True,
+                                label="训练时缩放至固定尺寸",
+                                info="关闭后保留原始尺寸并按批次补边；可能增加显存占用，ViT 需要开启。",
+                            )
                             preprocessing_output = gr.Markdown(
-                                backend._preprocessing_summary(224),
+                                backend._preprocessing_summary(224, True),
                                 elem_classes=["uatf-note"],
                             )
-                            inspect_button = gr.Button("导入并检查数据集", variant="primary")
+                            verify_image_content = gr.Checkbox(
+                                value=False,
+                                label="导入时逐张验证图片内容（耗时）",
+                            )
+                            inspect_button = gr.Button("导入数据集", variant="primary")
+                            dataset_import_progress = gr.HTML(
+                                value=backend._progress_bar_html(
+                                    0.0,
+                                    "等待导入数据集",
+                                    title="数据集导入与检查",
+                                )
+                            )
                             gr.Markdown(
                                 "ZIP 解压缓存位于 `outputs/ui_uploads/`；数据集记录和分布图位于 "
                                 "`outputs/ui_datasets/`。清理缓存不会移动或删除本地数据集源文件。",
@@ -261,7 +381,7 @@ def build_app(backend: Any) -> gr.Blocks:
                             )
                         with gr.Column(scale=7, elem_classes=["uatf-section"]):
                             gr.Markdown(
-                                "**尚未检查数据集**\n\n填写数据目录或上传 ZIP，然后点击“导入并检查数据集”。检查通过后，样本统计和预览会显示在这里。",
+                                "**尚未导入数据集**\n\n填写数据目录或上传 ZIP，然后导入数据集。标签、样本统计和预览会显示在这里。",
                                 elem_id="uatf-empty-state-dataset",
                             )
                             with gr.Group(
@@ -322,7 +442,7 @@ def build_app(backend: Any) -> gr.Blocks:
                     page_header("训练", "配置并启动一个训练任务")
                     with gr.Row(elem_id="uatf-empty-state-training") as training_dataset_empty_state:
                         gr.Markdown(
-                            "**训练配置尚未开放**\n\n请先导入并检查一个数据集。通过检查后，模型与训练参数会在此处显示。"
+                            "**训练配置尚未开放**\n\n请先导入一个数据集。完成数据集结构检查后，模型与训练参数会在此处显示。"
                         )
                         training_open_dataset = gr.Button("前往数据集", variant="secondary")
                     with gr.Group(visible=False) as training_config_group:
@@ -364,19 +484,39 @@ def build_app(backend: Any) -> gr.Blocks:
                                         label="Learning Rate",
                                     )
                                 with gr.Row():
+                                    device_choices = [("auto", "auto"), ("cpu", "cpu")]
+                                    cuda_available = backend.torch.cuda.is_available()
+                                    if cuda_available:
+                                        device_choices.insert(1, ("cuda", "cuda"))
                                     device_select = gr.Dropdown(
-                                        choices=["auto", "cuda", "cpu"],
-                                        value="auto",
+                                        choices=device_choices,
+                                        value="auto" if cuda_available else "cpu",
                                         label="Device",
+                                        info=(
+                                            None
+                                            if cuda_available
+                                            else (
+                                                "当前 Python 环境未检测到 CUDA；"
+                                                "需要 GPU 时请使用 CUDA 版 PyTorch 启动 UATF。"
+                                            )
+                                        ),
                                     )
                                     augmentation_enabled = gr.Checkbox(
                                         value=False,
                                         label="启用训练数据增强",
                                     )
+                                    worker_count_input = gr.Number(
+                                        value=min(4, max(0, (backend.os.cpu_count() or 1) - 1)),
+                                        precision=0,
+                                        minimum=0,
+                                        maximum=16,
+                                        label="DataLoader workers",
+                                        info="并行读取与缩放；大数据集可从 4 开始。内存较小时设为 0。",
+                                    )
                             with gr.Column(scale=4, elem_classes=["uatf-section"]):
                                 gr.Markdown("### 启动前确认", elem_classes=["uatf-section-title"])
                                 gr.Markdown(
-                                    "任务类型、数据格式、拆分、种子与图像尺寸沿用数据集检查结果。\n\n"
+                                    "任务类型、数据格式、拆分、种子与图像尺寸沿用数据集导入结果。\n\n"
                                     "配置会通过共享 UATF schema 写入 YAML，再由 CLI 启动训练。",
                                     elem_classes=["uatf-note"],
                                 )
@@ -401,6 +541,7 @@ def build_app(backend: Any) -> gr.Blocks:
                         )
                         refresh_task_button = gr.Button("刷新任务", variant="secondary")
                         stop_button = gr.Button("停止训练", variant="stop", interactive=False)
+                    training_monitor_timer = gr.Timer(value=1.0, active=False)
                     overall_progress_output = gr.Slider(
                         minimum=0,
                         maximum=100,
@@ -1111,7 +1252,13 @@ def build_app(backend: Any) -> gr.Blocks:
         )
         image_size_input.change(
             backend._preprocessing_summary,
-            inputs=image_size_input,
+            inputs=[image_size_input, resize_enabled],
+            outputs=preprocessing_output,
+            show_progress="hidden",
+        )
+        resize_enabled.change(
+            backend._preprocessing_summary,
+            inputs=[image_size_input, resize_enabled],
             outputs=preprocessing_output,
             show_progress="hidden",
         )
@@ -1129,6 +1276,7 @@ def build_app(backend: Any) -> gr.Blocks:
             training_config_group,
             dataset_inspection_results,
             training_dataset_empty_state,
+            dataset_import_progress,
         ]
         inspect_button.click(
             inspect_dataset,
@@ -1140,9 +1288,11 @@ def build_app(backend: Any) -> gr.Blocks:
                 validation_fraction,
                 seed_input,
                 image_size_input,
+                resize_enabled,
+                verify_image_content,
             ],
             outputs=inspect_outputs,
-            show_progress="minimal",
+            show_progress="hidden",
         ).then(
             lambda state: (
                 backend._inspection_summary(state["report"])
@@ -1170,6 +1320,7 @@ def build_app(backend: Any) -> gr.Blocks:
             validation_fraction,
             seed_input,
             image_size_input,
+            resize_enabled,
             accept_warnings,
             model_select,
             epochs_input,
@@ -1177,8 +1328,9 @@ def build_app(backend: Any) -> gr.Blocks:
             learning_rate_input,
             device_select,
             augmentation_enabled,
+            worker_count_input,
         ]
-        training_outputs = [
+        training_state_outputs = [
             status_output,
             overall_progress_output,
             epoch_output,
@@ -1204,14 +1356,19 @@ def build_app(backend: Any) -> gr.Blocks:
             resource_output,
             model_download,
             task_id_output,
+        ]
+        training_outputs = [
+            *training_state_outputs,
             *navigation_outputs,
             stop_button,
+            training_monitor_timer,
         ]
         start_button.click(
             backend.start_training_for_ui,
             inputs=training_inputs,
             outputs=training_outputs,
             show_progress="hidden",
+            concurrency_limit=1,
         )
 
         monitor_outputs = [
@@ -1225,7 +1382,15 @@ def build_app(backend: Any) -> gr.Blocks:
             task_id_output,
             resource_output,
             stop_button,
+            training_monitor_timer,
         ]
+        training_monitor_timer.tick(
+            backend.poll_training_for_ui,
+            inputs=task_id_output,
+            outputs=[*training_state_outputs, stop_button, training_monitor_timer],
+            show_progress="hidden",
+            concurrency_limit=1,
+        )
         demo.load(
             lambda: refresh_dashboard("工作台"),
             outputs=[dashboard_task_summary, dashboard_experiments],

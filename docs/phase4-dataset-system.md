@@ -39,7 +39,7 @@ In multi-label classification, each image can have any combination of labels. Fo
 
 ## Transforms
 
-`build_image_transform(image_size, mean, std)` composes only `Resize`, `ToTensor`, and `Normalize`. The defaults use 224 by 224 RGB images and ImageNet channel statistics. Pass a different size or channel statistics for a model or dataset with different requirements. Random augmentation is intentionally not included in this phase.
+`build_image_transform(image_size, mean, std, resize_enabled=True)` composes `Resize` when enabled, then `ToTensor` and `Normalize`. Resizing occurs while samples are loaded; UATF does not rewrite or cache a full resized copy of the dataset. With resizing disabled, variable-size batches are padded to the largest height and width in that batch. This is supported by convolutional adapters; fixed-input models such as ViT require resizing. Random augmentation is a separate training-only option.
 
 ## Splits and leakage
 

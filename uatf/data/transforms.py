@@ -21,17 +21,24 @@ DEFAULT_AUGMENTATION = {
 
 
 def build_image_transform(
-    image_size: int | tuple[int, int] = (224, 224),
+    image_size: int | tuple[int, int] | None = (224, 224),
     mean: Sequence[float] = (0.485, 0.456, 0.406),
     std: Sequence[float] = (0.229, 0.224, 0.225),
     *,
     augmentation: dict[str, Any] | None = None,
     training: bool = False,
+    resize_enabled: bool = True,
 ) -> transforms.Compose:
-    """Build image preprocessing; random augmentation is applied only for training."""
+    """Build image preprocessing; resizing and random augmentation are configurable."""
+    if not isinstance(resize_enabled, bool):
+        raise ValueError("resize_enabled must be a boolean.")
     size = (image_size, image_size) if isinstance(image_size, int) else image_size
-    if len(size) != 2 or any(dimension < 1 for dimension in size):
-        raise ValueError("image_size must contain two positive dimensions.")
+    if resize_enabled and (
+        size is None
+        or len(size) != 2
+        or any(isinstance(dimension, bool) or dimension < 1 for dimension in size)
+    ):
+        raise ValueError("image_size must contain two positive dimensions when resizing is enabled.")
     if len(mean) != 3 or len(std) != 3 or any(value <= 0 for value in std):
         raise ValueError("mean and std must each contain three RGB values; std must be positive.")
 
@@ -72,16 +79,12 @@ def build_image_transform(
                 )
             )
 
+    if resize_enabled:
+        operations.append(transforms.Resize(tuple(size)))
     operations.extend(
-        [
-            transforms.Resize(tuple(size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=tuple(mean), std=tuple(std)),
-        ]
+        [transforms.ToTensor(), transforms.Normalize(mean=tuple(mean), std=tuple(std))]
     )
-    return transforms.Compose(
-        operations
-    )
+    return transforms.Compose(operations)
 
 
 def _finite_number(name: str, value: Any) -> float:

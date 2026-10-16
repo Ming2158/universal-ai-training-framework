@@ -1,6 +1,6 @@
 # UATF Architecture
 
-UATF V2.0.0 is a local image-classification framework with shared configuration, training, evaluation, and artifact code for its GUI, CLI, YAML, and Python API workflows. The Gradio interface is a workspace over these modules; it does not implement a separate training algorithm.
+UATF V2.1.0 is a local image-classification framework with shared configuration, training, evaluation, and artifact code for its GUI, CLI, YAML, and Python API workflows. The Gradio interface is a workspace over these modules; it does not implement a separate training algorithm.
 
 ## Entry Points and Training Flow
 
@@ -31,7 +31,7 @@ The GUI keeps configuration and monitoring in separate pages. Starting a job wri
 | Module | Responsibility | Current contract |
 | --- | --- | --- |
 | `uatf.config` | Load YAML or Python mappings, merge defaults, apply overrides, validate fields and task/data combinations | Produces a normalized configuration mapping |
-| `uatf.data` | Validate folder/CSV datasets, inspect samples, transform images, create deterministic splits and loaders | Samples are `(image_tensor, target_tensor)` |
+| `uatf.data` | Validate folder/CSV datasets, inspect samples, transform images, create deterministic splits and loaders | Labeled batches use `(image_tensor, target_tensor)`; variable-size convolutional inputs are padded per batch |
 | `uatf.models` | Build supported architectures, adapt classifier heads, select task-aware losses | Models return raw `[batch, classes]` logits |
 | `uatf.training` | Train and validate, compute configured metrics, save/load checkpoints, resume, AMP and training strategies | Batches contain input and target tensors; loss returns one scalar |
 | `uatf.evaluation` | Evaluate classification and multi-label assets; write metrics, predictions and plots | Task is `classification` or `multi_label` |
@@ -50,6 +50,6 @@ V1 YAML files and historical experiment directories remain readable. Resume requ
 
 ## Scope and Extension Points
 
-The current training and evaluation contracts support single-label and multi-label image classification on one machine. Detection, segmentation, distributed training, exact content hashing, and managed experiment storage are outside V2.0.0 scope. Adding another task requires coordinated data-target, model-output, loss, trainer, metric, configuration, and UI contracts; the current tensor-classification trainer cannot be reused unchanged for detection or segmentation.
+The current training and evaluation contracts support single-label and multi-label image classification on one machine. V2.1.0 adds optional fixed-size resizing for convolutional models; ViT-B/16 still requires 224 x 224 inputs. Detection, segmentation, distributed training, exact content hashing, and managed experiment storage are outside V2.1.0 scope. Adding another task requires coordinated data-target, model-output, loss, trainer, metric, configuration, and UI contracts; the current tensor-classification trainer cannot be reused unchanged for detection or segmentation.
 
 Model builders are registered in `uatf.models.factory.MODEL_REGISTRY`. Dataset adapters, configuration validation, training contracts, and task-specific evaluation are the primary extension points. See [Configuration](configuration.md) for the supported schema and [Phase 9 GUI documentation](phase9-gradio-ui.md) for the workspace structure and behavior.

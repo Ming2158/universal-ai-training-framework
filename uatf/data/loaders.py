@@ -6,7 +6,43 @@ from math import floor
 from typing import Callable
 
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset, Subset, default_collate, random_split
+
+
+def pad_image_batch(images: list[Tensor]) -> Tensor:
+    """Pad variable-sized normalized images to the largest shape in the batch."""
+    if not images:
+        raise ValueError("An image batch cannot be empty.")
+    channels = images[0].shape[0]
+    if any(image.ndim != 3 or image.shape[0] != channels for image in images):
+        raise ValueError("Images in a batch must have the same channel count and three dimensions.")
+    height = max(image.shape[-2] for image in images)
+    width = max(image.shape[-1] for image in images)
+    height = max(32, (height + 31) // 32 * 32)
+    width = max(32, (width + 31) // 32 * 32)
+    batch = images[0].new_zeros((len(images), channels, height, width))
+    for index, image in enumerate(images):
+        batch[index, :, : image.shape[-2], : image.shape[-1]] = image
+    return batch
+
+
+def collate_image_batch(samples: list[tuple[Tensor, Tensor]]) -> tuple[Tensor, Tensor]:
+    """Pad labeled image samples while preserving their batched targets."""
+    images, targets = zip(*samples)
+    return pad_image_batch(list(images)), default_collate(list(targets))
+
+
+def collate_unlabeled_image_batch(images: list[Tensor]) -> Tensor:
+    """Pad image-only samples used by directory inference."""
+    return pad_image_batch(images)
+
+
+def _loader_options(num_workers: int, pin_memory: bool) -> dict[str, object]:
+    options: dict[str, object] = {"num_workers": num_workers, "pin_memory": pin_memory}
+    if num_workers > 0:
+        options.update(persistent_workers=True, prefetch_factor=2)
+    return options
 
 
 def split_dataset(
@@ -68,6 +104,9 @@ def create_data_loaders(
     num_workers: int = 0,
     train_transform: Callable | None = None,
     evaluation_transform: Callable | None = None,
+    *,
+    pad_variable_images: bool = False,
+    pin_memory: bool = False,
 ) -> tuple[DataLoader, DataLoader | None, DataLoader | None]:
     """Create shuffled training and ordered evaluation loaders from any Dataset."""
     if batch_size < 1:
@@ -96,20 +135,35 @@ def create_data_loaders(
                 validation_set = Subset(evaluation_dataset, validation_set.indices)
             if test_set is not None:
                 test_set = Subset(evaluation_dataset, test_set.indices)
+    loader_options = _loader_options(num_workers, pin_memory)
+    collate_fn = collate_image_batch if pad_variable_images else None
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
         generator=torch.Generator().manual_seed(seed),
+        collate_fn=collate_fn,
+        **loader_options,
     )
     validation_loader = (
-        DataLoader(validation_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        DataLoader(
+            validation_set,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            **loader_options,
+        )
         if validation_set is not None
         else None
     )
     test_loader = (
-        DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        DataLoader(
+            test_set,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            **loader_options,
+        )
         if test_set is not None
         else None
     )

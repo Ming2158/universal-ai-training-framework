@@ -6,9 +6,11 @@
 
 For first-time setup, see the [UATF usage guide](使用文档.md) for the GUI and CLI workflows.
 
-UATF 2.0.0 is a local PyTorch framework for single-label and multi-label image classification, with shared GUI, CLI, YAML, and Python API workflows.
+UATF 2.1.0 is a local PyTorch framework for single-label and multi-label image classification, with shared GUI, CLI, YAML, and Python API workflows.
 
 V2.0.0 retains V1.0.0 YAML configurations and historical experiment directories while adding dataset inspection, persistent tasks, experiment and model-asset management, independent evaluation, and inference.
+
+V2.1.0 adds optional on-the-fly resizing, variable-size batching for convolutional models, parallel data loading, and large ZIP space checks.
 
 ## Supported Features
 
@@ -16,6 +18,8 @@ V2.0.0 retains V1.0.0 YAML configurations and historical experiment directories 
 - ResNet50, ConvNeXt-Tiny, EfficientNet-B0, and ViT-B/16 models.
 - YAML configuration, CLI overrides, CPU/CUDA selection, optional CUDA AMP, Adam/AdamW/SGD, StepLR/cosine scheduling, clipping, accumulation, and early stopping.
 - Default-off training augmentation with deterministic validation and inference preprocessing.
+- Optional fixed-size resizing; disabling it keeps original dimensions and pads each batch for convolutional models.
+- Configurable parallel image loading with persistent workers and pinned memory for CUDA training.
 - Best/last checkpoints, resume through the Python `Trainer` API, metrics, prediction CSV, and plots.
 - A local Gradio interface that uses the same CLI training pipeline.
 - Independent evaluation of saved model assets, single-image inference, directory prediction, error review, and reloadable PyTorch model exports.
@@ -69,7 +73,7 @@ Image paths in CSV files are relative to the configured image directory. More ex
 
 ## Usage
 
-On Windows, double-click `启动UATF.bat` in the repository root to start the local UI. On first launch it creates a `venv` environment and installs CPU dependencies; Python 3.10, 3.11, or 3.12 and an internet connection are required for setup. The browser opens automatically. Close the launcher window to stop UATF.
+On Windows, double-click `启动UATF.bat` in the repository root to start the local UI. It uses an existing `.venv` with CUDA-enabled PyTorch when available; otherwise it creates or uses a `venv` environment with CPU dependencies. Python 3.10, 3.11, or 3.12 and an internet connection are required for setup. The browser opens automatically. Close the launcher window to stop UATF.
 
 The example config expects a multi-label dataset at `datasets/example/` with `annotations.csv` and `images/`:
 
@@ -153,6 +157,7 @@ uatf/cli_wizard.py         Bilingual interactive training wizard
 - [V2.0.0 acceptance report](docs/development/v2.0.0-phase8-acceptance.md)
 - [V2.0.0 release notes](docs/release-notes-v2.0.0.md)
 - [V2.0.0 release acceptance](docs/development/v2.0.0-release-acceptance.md)
+- [V2.1.0 release notes](docs/release-notes-v2.1.0.md)
 - [Gradio UI](docs/phase9-gradio-ui.md)
 - [Historical Engineering Review](docs/engineering-review.md)
 - [Changelog](CHANGELOG.md)
@@ -161,4 +166,4 @@ uatf/cli_wizard.py         Bilingual interactive training wizard
 
 ## Scope and Limitations
 
-UATF 2.0.0 focuses on single-label and multi-label image classification on one machine. Random splitting is not stratified or group-aware. There is no dedicated CLI `--resume` flag; YAML `training.resume_from`, `run_training()`, and `Trainer.resume()` support checkpoint restoration. Exact dataset-content checksums and managed experiment storage are not provided. See [Troubleshooting](docs/troubleshooting.md) for common environment, data, and checkpoint issues.
+UATF 2.1.0 focuses on single-label and multi-label image classification on one machine. Random splitting is not stratified or group-aware. There is no dedicated CLI `--resume` flag; YAML `training.resume_from`, `run_training()`, and `Trainer.resume()` support checkpoint restoration. Exact dataset-content checksums and managed experiment storage are not provided. See [Troubleshooting](docs/troubleshooting.md) for common environment, data, and checkpoint issues.

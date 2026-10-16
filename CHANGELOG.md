@@ -4,6 +4,25 @@ Notable changes for each release are recorded here.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-16
+
+### Added
+
+- Optional on-the-fly image resizing for convolutional models, with per-batch padding when disabled; ViT input requirements are validated before training.
+- Configurable DataLoader workers, persistent workers, CUDA pinned memory, and non-blocking device transfer.
+- ZIP extraction support up to 128 GiB with a free-space check and a 2 GiB safety reserve.
+
+### Fixed
+
+- Training input and dataset-state validation now completes before the UI enters background monitoring, so invalid starts return a readable error without a phantom task.
+- Empty resize input no longer raises an unhandled UI callback exception.
+- Large folder inspection no longer walks nested split directories in a second recursive pass.
+- Folder inspection progress and image-content verification remain independently selectable.
+
+### Compatibility
+
+- Existing configurations default to fixed 224 x 224 resizing; legacy checkpoints without `resize_enabled` retain their previous resume compatibility.
+
 ## [2.0.0] - 2026-10-16
 
 ### Added

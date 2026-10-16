@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,33 @@ def test_task_status_transitions_are_persisted_with_lifecycle_metadata(
 
     with pytest.raises(ValueError, match="Invalid task status transition"):
         manager.update("Running")
+
+
+def test_task_json_read_retries_a_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = TaskManager(tmp_path / "runs", "transient-read")
+    manager.acquire()
+    manager.update("Preparing")
+    manager.release()
+
+    original_read_text = Path.read_text
+    failed_once = False
+
+    def read_with_one_temporary_denial(path: Path, *args, **kwargs) -> str:
+        nonlocal failed_once
+        if path == manager.record_path and not failed_once:
+            failed_once = True
+            raise PermissionError("temporary file share conflict")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_with_one_temporary_denial)
+
+    assert (
+        get_task(tmp_path / "runs", "transient-read", reconcile_interruption=False)["status"]
+        == "Preparing"
+    )
+    assert failed_once
 
 
 def test_only_one_task_can_hold_an_output_root_lock(tmp_path: Path) -> None:
@@ -105,15 +133,34 @@ def test_preparing_transition_does_not_overwrite_a_concurrent_stop(tmp_path: Pat
     manager.release()
 
 
-def test_query_marks_a_dead_active_process_as_interrupted(tmp_path: Path) -> None:
+def test_query_does_not_reconcile_an_active_task_while_its_lock_is_held(
+    tmp_path: Path,
+) -> None:
     output_dir = tmp_path / "runs"
     manager = TaskManager(output_dir, "interrupted", process_id=2_000_000_000)
     manager.acquire()
+    try:
+        manager.update("Preparing")
+        manager.set_stage("training", epoch=2, total_epochs=4)
+
+        record = get_task(output_dir, "interrupted")
+    finally:
+        manager.release()
+
+    assert record["status"] == "Running"
+
+
+def test_query_marks_a_released_task_failed_even_when_its_pid_is_alive(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "runs"
+    manager = TaskManager(output_dir, "interrupted", process_id=os.getpid())
+    manager.acquire()
     manager.update("Preparing")
     manager.set_stage("training", epoch=2, total_epochs=4)
+    manager.release()
 
     record = get_task(output_dir, "interrupted")
 
     assert record["status"] == "Failed"
     assert "进程已退出" in record["error_summary"]
-    manager.release()

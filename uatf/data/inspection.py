@@ -6,7 +6,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from torch.utils.data import Dataset
 
@@ -19,6 +19,8 @@ from uatf.data.datasets import (
     _validate_image,
 )
 from uatf.data.loaders import split_dataset
+
+SPLIT_DIRECTORY_NAMES = {"train", "training", "val", "valid", "validation", "test", "testing"}
 
 
 @dataclass
@@ -37,6 +39,7 @@ class DatasetInspection:
     validation_count: int = 0
     validation_fraction: float = 0.2
     seed: int = 42
+    image_content_verified: bool = True
     split_strategy: str = "random_split"
     annotation_csv: Path | None = None
     image_root: Path | None = None
@@ -64,6 +67,7 @@ class DatasetInspection:
             "valid_sample_count": self.valid_sample_count,
             "class_names": list(self.class_names),
             "class_counts": list(self.class_counts),
+            "image_content_verified": self.image_content_verified,
             "split": {
                 "strategy": self.split_strategy,
                 "train_count": self.train_count,
@@ -114,9 +118,15 @@ def _append_once(values: list[str], value: str) -> None:
         values.append(value)
 
 
-def _image_problem(report: DatasetInspection, path: Path, context: str) -> bool:
+def _image_problem(
+    report: DatasetInspection,
+    path: Path,
+    context: str,
+    *,
+    verify_image_content: bool,
+) -> bool:
     try:
-        _validate_image(path, context, verify_images=True)
+        _validate_image(path, context, verify_images=verify_image_content)
     except DatasetValidationError as error:
         message = str(error)
         if "does not exist" in message:
@@ -134,6 +144,8 @@ def _add_sample(
     target: int | tuple[int, ...],
     seen: set[str],
     context: str,
+    *,
+    verify_image_content: bool,
 ) -> bool:
     key = os.path.normcase(str(path))
     if key in seen:
@@ -141,7 +153,9 @@ def _add_sample(
         _append_once(report.errors, f"{context}: duplicate image path: {path}")
         return False
     seen.add(key)
-    if _image_problem(report, path, context):
+    if _image_problem(
+        report, path, context, verify_image_content=verify_image_content
+    ):
         return False
     report.samples.append((path, target))
     return True
@@ -163,7 +177,12 @@ def _folder_root(path: Path) -> Path:
     return path
 
 
-def _folder_parts(root: Path, report: DatasetInspection) -> tuple[list[str], list[tuple[Path, str]]]:
+def _folder_parts(
+    root: Path,
+    report: DatasetInspection,
+    progress_callback: Callable[[float | None, str], None] | None = None,
+    nested_split_matches: set[str] | None = None,
+) -> tuple[list[str], list[tuple[Path, str]]]:
     if not root.is_dir():
         _append_once(report.errors, f"Image dataset directory does not exist: {root}")
         return [], []
@@ -179,30 +198,43 @@ def _folder_parts(root: Path, report: DatasetInspection) -> tuple[list[str], lis
 
     class_names = [directory.name for directory in directories]
     candidates: list[tuple[Path, str]] = []
+    scanned_items = 0
     for directory in directories:
-        image_paths = sorted(
-            (
-                item.resolve()
-                for item in directory.rglob("*")
-                if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
-            ),
-            key=str,
-        )
+        image_paths: list[Path] = []
+        unsupported_count = 0
+        unsupported_examples: list[Path] = []
+        for item in directory.rglob("*"):
+            scanned_items += 1
+            if progress_callback is not None and scanned_items % 500 == 0:
+                progress_callback(
+                    None,
+                    f"扫描图片目录 | 已扫描 {scanned_items:,} 项，发现 {len(candidates) + len(image_paths):,} 张图片",
+                )
+            if item.is_dir():
+                if nested_split_matches is not None and item.name.casefold() in SPLIT_DIRECTORY_NAMES:
+                    nested_split_matches.add(
+                        f"{directory.name}/{item.relative_to(directory).as_posix()}"
+                    )
+                continue
+            if not item.is_file():
+                continue
+            if item.suffix.lower() in IMAGE_EXTENSIONS:
+                image_paths.append(item.resolve())
+            else:
+                unsupported_count += 1
+                if len(unsupported_examples) < 10:
+                    unsupported_examples.append(item)
+        image_paths.sort(key=str)
         if not image_paths:
             _append_once(report.abnormal_samples, f"Class directory contains no images: {directory}")
             _append_once(report.warnings, f"Class directory contains no images: {directory}")
         candidates.extend((image_path, directory.name) for image_path in image_paths)
-        unsupported = [
-            item
-            for item in directory.rglob("*")
-            if item.is_file() and item.suffix.lower() not in IMAGE_EXTENSIONS
-        ]
-        for item in unsupported:
+        for item in unsupported_examples:
             _append_once(report.abnormal_samples, f"Unsupported file ignored: {item}")
-        if unsupported:
+        if unsupported_count:
             _append_once(
                 report.warnings,
-                f"{len(unsupported)} unsupported file(s) in class directory {directory.name!r} were ignored.",
+                f"{unsupported_count} unsupported file(s) in class directory {directory.name!r} were ignored.",
             )
     root_files = [item for item in root.iterdir() if item.is_file()]
     for item in root_files:
@@ -212,16 +244,23 @@ def _folder_parts(root: Path, report: DatasetInspection) -> tuple[list[str], lis
     return class_names, candidates
 
 
-def _inspect_image_folder(report: DatasetInspection) -> None:
+def _inspect_image_folder(
+    report: DatasetInspection,
+    progress_callback: Callable[[float | None, str], None] | None = None,
+    *,
+    verify_image_content: bool,
+) -> None:
     root = _folder_root(report.path)
     fixed_validation = next(
         (root / name for name in ("validation", "val") if (root / name).is_dir()), None
     )
     if fixed_validation is not None and (root / "train").is_dir():
         train_root = root / "train"
-        train_classes, train_candidates = _folder_parts(train_root, report)
+        train_classes, train_candidates = _folder_parts(train_root, report, progress_callback)
         validation_report = DatasetInspection(path=fixed_validation, format="image_folder")
-        validation_classes, validation_candidates = _folder_parts(fixed_validation, validation_report)
+        validation_classes, validation_candidates = _folder_parts(
+            fixed_validation, validation_report, progress_callback
+        )
         if train_classes != validation_classes:
             _append_once(
                 report.errors,
@@ -238,15 +277,54 @@ def _inspect_image_folder(report: DatasetInspection) -> None:
         report.image_root = train_root.resolve()
         class_to_idx = {name: index for index, name in enumerate(train_classes)}
         seen: set[str] = set()
+        total_candidates = len(train_candidates) + len(validation_candidates)
+        if progress_callback is not None:
+            description = (
+                "开始验证图片文件内容"
+                if verify_image_content
+                else "读取图片清单，跳过内容验证"
+            )
+            progress_callback(0.2, f"已发现 {total_candidates:,} 张图片，{description}")
+        checked = 0
         for path, name in train_candidates:
+            checked += 1
+            if progress_callback is not None and (
+                checked == 1 or checked % max(1, total_candidates // 100) == 0
+            ):
+                progress_callback(
+                    0.2 + 0.7 * checked / max(total_candidates, 1),
+                    f"{'验证图片' if verify_image_content else '读取图片清单'} {checked:,}/{total_candidates:,}",
+                )
             if name in class_to_idx:
-                _add_sample(report, path, class_to_idx[name], seen, "Training folder")
+                _add_sample(
+                    report,
+                    path,
+                    class_to_idx[name],
+                    seen,
+                    "Training folder",
+                    verify_image_content=verify_image_content,
+                )
         report.train_count = len(report.samples)
         train_samples = len(report.samples)
         validation_seen: set[str] = set()
         for path, name in validation_candidates:
+            checked += 1
+            if progress_callback is not None and (
+                checked == 1 or checked % max(1, total_candidates // 100) == 0 or checked == total_candidates
+            ):
+                progress_callback(
+                    0.2 + 0.7 * checked / max(total_candidates, 1),
+                    f"{'验证图片' if verify_image_content else '读取图片清单'} {checked:,}/{total_candidates:,}",
+                )
             if name in class_to_idx:
-                _add_sample(report, path, class_to_idx[name], validation_seen, "Validation folder")
+                _add_sample(
+                    report,
+                    path,
+                    class_to_idx[name],
+                    validation_seen,
+                    "Validation folder",
+                    verify_image_content=verify_image_content,
+                )
         overlap = seen.intersection(validation_seen)
         for key in sorted(overlap):
             path = next((str(item[0]) for item in report.samples if os.path.normcase(str(item[0])) == key), key)
@@ -258,24 +336,14 @@ def _inspect_image_folder(report: DatasetInspection) -> None:
     else:
         report.path = root.resolve()
         report.image_root = root.resolve()
-        split_directory_names = {
-            "train",
-            "training",
-            "val",
-            "valid",
-            "validation",
-            "test",
-            "testing",
-        }
-        nested_split_directories = sorted(
-            {
-                f"{class_directory.name}/{directory.relative_to(class_directory).as_posix()}"
-                for class_directory in root.iterdir()
-                if class_directory.is_dir()
-                for directory in class_directory.rglob("*")
-                if directory.is_dir() and directory.name.casefold() in split_directory_names
-            }
+        nested_split_matches: set[str] = set()
+        report.class_names, candidates = _folder_parts(
+            root,
+            report,
+            progress_callback,
+            nested_split_matches=nested_split_matches,
         )
+        nested_split_directories = sorted(nested_split_matches)
         if nested_split_directories:
             examples = ", ".join(repr(item) for item in nested_split_directories[:3])
             if len(nested_split_directories) > 3:
@@ -286,12 +354,34 @@ def _inspect_image_folder(report: DatasetInspection) -> None:
                 f"({examples}). Their images are included in the random split; "
                 "verify they are not a held-out test set.",
             )
-        report.class_names, candidates = _folder_parts(root, report)
         report.sample_count = len(candidates)
         class_to_idx = {name: index for index, name in enumerate(report.class_names)}
         seen: set[str] = set()
-        for path, name in candidates:
-            _add_sample(report, path, class_to_idx[name], seen, "Image-folder data")
+        if progress_callback is not None:
+            description = (
+                "开始验证图片文件内容"
+                if verify_image_content
+                else "读取图片清单，跳过内容验证"
+            )
+            progress_callback(0.2, f"已发现 {len(candidates):,} 张图片，{description}")
+        for sample_index, (path, name) in enumerate(candidates, start=1):
+            if progress_callback is not None and (
+                sample_index == 1
+                or sample_index % max(1, len(candidates) // 100) == 0
+                or sample_index == len(candidates)
+            ):
+                progress_callback(
+                    0.2 + 0.7 * sample_index / max(len(candidates), 1),
+                    f"{'验证图片' if verify_image_content else '读取图片清单'} {sample_index:,}/{len(candidates):,}",
+                )
+            _add_sample(
+                report,
+                path,
+                class_to_idx[name],
+                seen,
+                "Image-folder data",
+                verify_image_content=verify_image_content,
+            )
 
 
 def _resolve_csv(path: Path, data_format: str) -> Path:
@@ -325,8 +415,12 @@ def _inspect_csv(
     *,
     image_root: str | Path | None,
     label_columns: list[str] | None,
+    progress_callback: Callable[[float | None, str], None] | None = None,
+    verify_image_content: bool,
 ) -> None:
     try:
+        if progress_callback is not None:
+            progress_callback(0.01, "读取 CSV 标注")
         csv_path = _resolve_csv(report.path, report.format)
         header, rows = _read_csv(csv_path)
     except (DatasetValidationError, OSError, ValueError) as error:
@@ -393,7 +487,18 @@ def _inspect_csv(
     report.sample_count = len(rows)
     raw_valid: list[tuple[Path, str | tuple[int, ...]]] = []
     seen: set[str] = set()
-    for line_number, row in rows:
+    progress_interval = max(1, len(rows) // 100)
+    for sample_index, (line_number, row) in enumerate(rows, start=1):
+        if progress_callback is not None and (
+            sample_index == 1
+            or sample_index % progress_interval == 0
+            or sample_index == len(rows)
+        ):
+            fraction = 0.02 + 0.88 * sample_index / max(len(rows), 1)
+            progress_callback(
+                fraction,
+                f"{'验证图片' if verify_image_content else '读取标注'} {sample_index:,}/{len(rows):,}",
+            )
         if len(row) != len(header):
             message = f"CSV row {line_number} has {len(row)} fields; expected {len(header)}."
             _append_once(report.errors, message)
@@ -412,7 +517,12 @@ def _inspect_csv(
             _append_once(report.errors, f"CSV row {line_number} repeats image_path: {path}")
             continue
         seen.add(key)
-        image_is_bad = _image_problem(report, path, f"CSV row {line_number}")
+        image_is_bad = _image_problem(
+            report,
+            path,
+            f"CSV row {line_number}",
+            verify_image_content=verify_image_content,
+        )
 
         if report.format == "csv_classification":
             label = row[label_indices[0]]
@@ -442,6 +552,9 @@ def _inspect_csv(
             target = tuple(values)
         if not image_is_bad:
             raw_valid.append((path, target))
+
+    if progress_callback is not None:
+        progress_callback(0.94, "汇总标签与训练/验证划分")
 
     if report.format == "csv_classification":
         report.class_names = sorted({label for _, label in raw_valid if isinstance(label, str)})
@@ -547,6 +660,8 @@ def inspect_dataset(
     seed: int = 42,
     image_root: str | Path | None = None,
     label_columns: list[str] | None = None,
+    progress_callback: Callable[[float | None, str], None] | None = None,
+    verify_image_content: bool = True,
 ) -> DatasetInspection:
     """Inspect an existing UATF image dataset without changing it or copying files."""
     normalized_format = data_format.strip().lower()
@@ -557,6 +672,7 @@ def inspect_dataset(
         format=normalized_format,
         validation_fraction=validation_fraction,
         seed=seed,
+        image_content_verified=verify_image_content,
     )
     if normalized_format not in supported:
         _append_once(report.errors, f"Unsupported dataset format: {data_format!r}.")
@@ -569,9 +685,26 @@ def inspect_dataset(
         return report
 
     if normalized_format == "image_folder":
-        _inspect_image_folder(report)
+        if progress_callback is not None:
+            progress_callback(0.01, "扫描图片目录")
+        _inspect_image_folder(
+            report,
+            progress_callback,
+            verify_image_content=verify_image_content,
+        )
     else:
-        _inspect_csv(report, image_root=image_root, label_columns=label_columns)
+        _inspect_csv(
+            report,
+            image_root=image_root,
+            label_columns=label_columns,
+            progress_callback=progress_callback,
+            verify_image_content=verify_image_content,
+        )
     if not report.samples and not report.errors:
         _append_once(report.errors, "Dataset contains no valid image samples.")
-    return _finish_report(report)
+    if progress_callback is not None:
+        progress_callback(0.97, "生成数据集统计")
+    result = _finish_report(report)
+    if progress_callback is not None:
+        progress_callback(1.0, "数据集检查完成")
+    return result

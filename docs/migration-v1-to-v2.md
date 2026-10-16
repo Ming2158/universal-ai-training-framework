@@ -2,7 +2,7 @@
 
 V2.0.0 extends the local image-classification workflow with dataset inspection, task records, experiment and model-asset indexes, independent evaluation, and inference. It retains the V1 configuration schema and existing experiment directories.
 
-V2.0.0 is the current release. Package metadata is `2.0.0`; the existing `v1.0.0` tag remains unchanged. See the [release notes](release-notes-v2.0.0.md) and [release acceptance record](development/v2.0.0-release-acceptance.md) for verified behavior and known gaps.
+V2.1.0 is the current release. Package metadata is `2.1.0`; the existing `v1.0.0` tag remains unchanged. See the [V2.1.0 release notes](release-notes-v2.1.0.md) for the latest behavior and verification. V2.0.0 documentation remains available as a historical release record.
 
 ## Before upgrading
 
@@ -26,7 +26,7 @@ Existing V1 YAML files remain accepted by the current configuration resolver. No
 .\.venv-v2\Scripts\python.exe train.py --config configs/example.yaml
 ```
 
-The current schema adds configuration for optimizer and scheduler choices, augmentation, task-compatible loss, and checkpoint resume. Unknown keys and invalid task/data combinations are rejected with a field-specific error. Review `configs/default.yaml` and [Configuration](configuration.md) before adding those fields. Generated effective `config.yaml` files include normalized values and are intended for this or a newer UATF version.
+The current schema adds configuration for optimizer and scheduler choices, augmentation, task-compatible loss, checkpoint resume, and optional image resizing. Existing configs without `dataset.resize_enabled` retain the previous resize behavior. Disabling resizing is supported for convolutional models with per-batch padding; ViT requires resizing. Unknown keys and invalid task/data combinations are rejected with a field-specific error. Review `configs/default.yaml` and [Configuration](configuration.md) before adding those fields. Generated effective `config.yaml` files include normalized values and are intended for this or a newer UATF version.
 
 CLI overrides remain available for epochs, batch size, learning rate, seed, device, and output directory. The interactive CLI wizard is additive. There is no dedicated `--resume` flag; set `training.resume_from` in YAML or use the Python API.
 

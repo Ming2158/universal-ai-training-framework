@@ -4,7 +4,13 @@ cd /d "%~dp0"
 title UATF Local Training UI
 
 set "PYTHON=venv\Scripts\python.exe"
+set "CUDA_PYTHON=.venv\Scripts\python.exe"
 set "PYVER="
+
+if exist "%CUDA_PYTHON%" (
+    "%CUDA_PYTHON%" -c "import gradio, torch, torchvision, PIL, yaml, matplotlib; raise SystemExit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
+    if not errorlevel 1 set "PYTHON=%CUDA_PYTHON%"
+)
 
 if exist "%PYTHON%" (
     "%PYTHON%" --version >nul 2>&1

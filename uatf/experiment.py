@@ -29,6 +29,7 @@ from uatf.data import (
     CsvMultiLabelDataset,
     ImageFolderDataset,
     build_image_transform,
+    collate_image_batch,
     create_data_loaders,
 )
 from uatf.evaluation import evaluate_training_run
@@ -56,10 +57,12 @@ def _image_loaders(
 ) -> tuple[DataLoader, DataLoader, list[str], dict[str, Any]]:
     dataset_config = configuration["dataset"]
     training_config = configuration["training"]
+    resize_enabled = dataset_config.get("resize_enabled", True)
     transform = build_image_transform(
         image_size=dataset_config["image_size"],
         mean=dataset_config["mean"],
         std=dataset_config["std"],
+        resize_enabled=resize_enabled,
     )
     training_transform = build_image_transform(
         image_size=dataset_config["image_size"],
@@ -67,9 +70,11 @@ def _image_loaders(
         std=dataset_config["std"],
         augmentation=dataset_config["augmentation"],
         training=True,
+        resize_enabled=resize_enabled,
     )
     batch_size = training_config["batch_size"]
     num_workers = training_config["num_workers"]
+    pin_memory = training_config["device"] != "cpu" and torch.cuda.is_available()
     data_format = dataset_config["format"]
 
     if data_format == "image_folder":
@@ -88,19 +93,35 @@ def _image_loaders(
 
         if train_path is None:
             raise ValueError("Image-folder data requires dataset.path or dataset.train_dir.")
-        train_dataset = ImageFolderDataset(train_path, transform=training_transform)
+        train_dataset = ImageFolderDataset(
+            train_path, transform=training_transform, verify_images=False
+        )
         if validation_path is not None:
-            validation_dataset = ImageFolderDataset(validation_path, transform=transform)
+            validation_dataset = ImageFolderDataset(
+                validation_path, transform=transform, verify_images=False
+            )
             if train_dataset.classes != validation_dataset.classes:
                 raise ValueError(
                     "Training and validation folders must contain the same class directories "
                     "in the same sorted order."
                 )
             train_loader = _loader(
-                train_dataset, batch_size, num_workers, shuffle=True, seed=seed
+                train_dataset,
+                batch_size,
+                num_workers,
+                shuffle=True,
+                seed=seed,
+                pad_variable_images=not resize_enabled,
+                pin_memory=pin_memory,
             )
             validation_loader = _loader(
-                validation_dataset, batch_size, num_workers, shuffle=False, seed=seed
+                validation_dataset,
+                batch_size,
+                num_workers,
+                shuffle=False,
+                seed=seed,
+                pad_variable_images=not resize_enabled,
+                pin_memory=pin_memory,
             )
             validation_count = len(validation_dataset)
             validation_source = str(validation_path)
@@ -113,6 +134,8 @@ def _image_loaders(
                 num_workers=num_workers,
                 train_transform=training_transform,
                 evaluation_transform=transform,
+                pad_variable_images=not resize_enabled,
+                pin_memory=pin_memory,
             )
             if optional_validation_loader is None:
                 raise ValueError("A validation dataset is required for evaluation.")
@@ -164,12 +187,16 @@ def _image_loaders(
             image_root=image_root,
             transform=transform,
             label_columns=labels,
+            verify_images=False,
         )
     else:
         if labels is not None:
             raise ValueError("dataset.label_columns is only supported for csv_multilabel.")
         full_dataset = CsvImageClassificationDataset(
-            annotation_path, image_root=image_root, transform=transform
+            annotation_path,
+            image_root=image_root,
+            transform=transform,
+            verify_images=False,
         )
 
     train_loader, validation_loader, _ = create_data_loaders(
@@ -180,6 +207,8 @@ def _image_loaders(
         num_workers=num_workers,
         train_transform=training_transform,
         evaluation_transform=transform,
+        pad_variable_images=not resize_enabled,
+        pin_memory=pin_memory,
     )
     if validation_loader is None:
         raise ValueError("A validation dataset is required for evaluation.")
@@ -203,13 +232,19 @@ def _loader(
     *,
     shuffle: bool,
     seed: int,
+    pad_variable_images: bool = False,
+    pin_memory: bool = False,
 ) -> DataLoader:
+    options: dict[str, Any] = {"num_workers": num_workers, "pin_memory": pin_memory}
+    if num_workers > 0:
+        options.update(persistent_workers=True, prefetch_factor=2)
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=num_workers,
         generator=torch.Generator().manual_seed(seed) if shuffle else None,
+        collate_fn=collate_image_batch if pad_variable_images else None,
+        **options,
     )
 
 
@@ -428,7 +463,8 @@ def _register_experiment_model_asset(
             "dataset_format": dataset_config["format"],
             "class_names": list(record.get("dataset", {}).get("class_names", [])),
             "preprocessing": {
-                key: dataset_config.get(key) for key in ("image_size", "mean", "std")
+                key: dataset_config.get(key)
+                for key in ("image_size", "resize_enabled", "mean", "std")
             },
             "training_summary": {
                 "epochs_completed": record.get("training", {}).get("epochs_completed", 0),
@@ -607,6 +643,15 @@ def _execute_experiment(
     """Execute one run inside the directory allocated by :func:`run_experiment`."""
     task = configuration["task"]["type"]
     training_config = configuration["training"]
+    event_emitter = TrainingEventEmitter(event_callback)
+    if event_callback is not None:
+        event_emitter(
+            TrainingEvent(
+                event_type="training_started",
+                experiment_dir=str(experiment_dir),
+                total_epochs=training_config["epochs"],
+            )
+        )
     model_adapter = get_model_adapter(configuration["model"]["name"])
     seed = training_config["seed"]
     random.seed(seed)
@@ -650,9 +695,10 @@ def _execute_experiment(
         "validation_fraction": dataset_config["validation_fraction"],
         "seed": training_config["seed"],
         "image_size": dataset_config["image_size"],
+        "resize_enabled": dataset_config["resize_enabled"],
         "mean": list(dataset_config["mean"]),
         "std": list(dataset_config["std"]),
-            "augmentation": dataset_config["augmentation"],
+        "augmentation": dataset_config["augmentation"],
     }
     if dataset_config.get("train_dir") and not dataset_config.get("path"):
         resume_dataset_metadata["validation_dir"] = (
@@ -676,7 +722,6 @@ def _execute_experiment(
     )
     experiment_record["artifacts"]["dataset_manifest"] = dataset_metadata["manifest_path"]
     dump_config(configuration, experiment_dir / "config.yaml")
-    event_emitter = TrainingEventEmitter(event_callback)
 
     def persist_status(
         status: str, epoch: int | None, total_epochs: int | None
@@ -692,14 +737,6 @@ def _execute_experiment(
             task_status_callback(status, epoch, total_epochs)
 
     try:
-        if event_callback is not None:
-            event_emitter(
-                TrainingEvent(
-                    event_type="training_started",
-                    experiment_dir=str(experiment_dir),
-                    total_epochs=training_config["epochs"],
-                )
-            )
         logger.info("Experiment: %s", experiment_dir.name)
         logger.info("Configuration: %s", experiment_dir / "config.yaml")
         logger.info(

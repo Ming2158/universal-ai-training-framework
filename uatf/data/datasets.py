@@ -240,8 +240,9 @@ class CsvImageClassificationDataset(_ImageDataset):
             (path, self.class_to_idx[label])
             for _, path, label in raw_rows
         ]
-        for row_number, path, _ in raw_rows:
-            _validate_image(path, f"CSV row {row_number}", verify_images)
+        if verify_images:
+            for row_number, path, _ in raw_rows:
+                _validate_image(path, f"CSV row {row_number}", verify_images=True)
         super().__init__(samples, transform, verify_images=False)
 
 
@@ -315,7 +316,8 @@ class CsvMultiLabelDataset(_ImageDataset):
                         f"'{column}'; expected 0 or 1."
                     )
                 values.append(int(value))
-            _validate_image(path, f"CSV row {row_number}", verify_images)
+            if verify_images:
+                _validate_image(path, f"CSV row {row_number}", verify_images=True)
             samples.append((path, tuple(values)))
 
         if not samples:

@@ -9,8 +9,6 @@ import subprocess
 import time
 from typing import Any
 
-import torch
-
 
 def _finite_number(value: Any) -> float | None:
     try:
@@ -30,18 +28,9 @@ class HardwareResourceSampler:
         except Exception:
             self._psutil = None
         self._process: Any = None
-        self._nvml: Any = None
-        self._nvml_handle: Any = None
         self._nvidia_smi = shutil.which("nvidia-smi")
         self._last_smi_sample = 0.0
-        self._smi_values: dict[str, float | None] = {}
-        try:
-            self._nvml = importlib.import_module("pynvml")
-            self._nvml.nvmlInit()
-            self._nvml_handle = self._nvml.nvmlDeviceGetHandleByIndex(0)
-        except Exception:
-            self._nvml = None
-            self._nvml_handle = None
+        self._smi_values: dict[str, Any] = {}
 
     def attach_process(self, process_id: int) -> None:
         if self._psutil is None:
@@ -53,43 +42,17 @@ class HardwareResourceSampler:
             self._process = None
 
     def close(self) -> None:
-        if self._nvml is None:
-            return
-        try:
-            self._nvml.nvmlShutdown()
-        except Exception:
-            pass
-        self._nvml = None
-        self._nvml_handle = None
+        return None
 
-    def _gpu_utilization(self) -> dict[str, float | None]:
-        values: dict[str, float | None] = {
+    def _gpu_snapshot(self) -> dict[str, Any]:
+        values: dict[str, Any] = {
+            "name": None,
             "utilization_percent": None,
+            "memory_used_bytes": None,
+            "memory_total_bytes": None,
             "temperature_c": None,
             "power_watts": None,
         }
-        if self._nvml is not None and self._nvml_handle is not None:
-            try:
-                utilization = self._nvml.nvmlDeviceGetUtilizationRates(self._nvml_handle)
-                values["utilization_percent"] = _finite_number(utilization.gpu)
-            except Exception:
-                pass
-            try:
-                values["temperature_c"] = _finite_number(
-                    self._nvml.nvmlDeviceGetTemperature(
-                        self._nvml_handle, self._nvml.NVML_TEMPERATURE_GPU
-                    )
-                )
-            except Exception:
-                pass
-            try:
-                values["power_watts"] = _finite_number(
-                    self._nvml.nvmlDeviceGetPowerUsage(self._nvml_handle) / 1000
-                )
-            except Exception:
-                pass
-            return values
-
         now = time.monotonic()
         if self._nvidia_smi and now - self._last_smi_sample >= 5:
             self._last_smi_sample = now
@@ -97,7 +60,7 @@ class HardwareResourceSampler:
                 result = subprocess.run(
                     [
                         self._nvidia_smi,
-                        "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
+                        "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
                         "--format=csv,noheader,nounits",
                     ],
                     capture_output=True,
@@ -106,12 +69,25 @@ class HardwareResourceSampler:
                     timeout=1.5,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-                fields = result.stdout.splitlines()[0].split(",")
-                if len(fields) == 3:
+                fields = result.stdout.splitlines()[0].split(",", maxsplit=5)
+                if len(fields) == 6:
+                    memory_used_mib = _finite_number(fields[2])
+                    memory_total_mib = _finite_number(fields[3])
                     self._smi_values = {
-                        "utilization_percent": _finite_number(fields[0]),
-                        "temperature_c": _finite_number(fields[1]),
-                        "power_watts": _finite_number(fields[2]),
+                        "name": fields[0].strip() or None,
+                        "utilization_percent": _finite_number(fields[1]),
+                        "memory_used_bytes": (
+                            int(memory_used_mib * 1024**2)
+                            if memory_used_mib is not None
+                            else None
+                        ),
+                        "memory_total_bytes": (
+                            int(memory_total_mib * 1024**2)
+                            if memory_total_mib is not None
+                            else None
+                        ),
+                        "temperature_c": _finite_number(fields[4]),
+                        "power_watts": _finite_number(fields[5]),
                     }
             except Exception:
                 self._smi_values = {}
@@ -160,19 +136,7 @@ class HardwareResourceSampler:
             "temperature_c": None,
             "power_watts": None,
         }
-        try:
-            if torch.cuda.is_available():
-                device_index = 0
-                gpu["name"] = torch.cuda.get_device_name(device_index)
-                free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
-                gpu["memory_total_bytes"] = int(total_bytes)
-                gpu["memory_used_bytes"] = int(total_bytes - free_bytes)
-                gpu["torch_allocated_bytes"] = int(
-                    torch.cuda.memory_allocated(device_index)
-                )
-                gpu.update(self._gpu_utilization())
-        except Exception:
-            pass
+        gpu.update(self._gpu_snapshot())
         return {"cpu": cpu, "memory": memory, "gpu": gpu}
 
 

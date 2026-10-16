@@ -36,7 +36,7 @@ New adapters should test a forward pass, training, checkpoint save and reload, e
 
 ## Preprocessing and Augmentation
 
-Resize and RGB normalization remain shared by training, validation, evaluation, and inference. Training augmentation is a separate, optional pipeline. It supports horizontal flip, rotation, brightness, contrast, saturation, and hue changes; every value is validated before data loading. The defaults disable augmentation. Validation, test, independent evaluation, and prediction always use deterministic resize and normalization, even when a model asset's training config records augmentation.
+RGB normalization remains shared by training, validation, evaluation, and inference. Fixed-size resize is optional for convolutional adapters and is applied lazily as samples load, not by writing a second dataset copy. When disabled, mixed image sizes are padded within each batch; ViT-B/16 requires resize to remain enabled. Training augmentation is a separate, optional pipeline. It supports horizontal flip, rotation, brightness, contrast, saturation, and hue changes; every value is validated before data loading. Validation, test, independent evaluation, and prediction use the resize setting recorded in the model asset and never apply random augmentation.
 
 ```yaml
 dataset:

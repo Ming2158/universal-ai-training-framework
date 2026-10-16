@@ -122,7 +122,7 @@ def test_gui_inspection_returns_real_preview_and_persistent_dataset_record(
     assert original.size == (10, 8)
     assert processed.size == (16, 16)
     assert str(dataset_path) in information
-    assert "检查通过" in summary
+    assert "结构检查完成" in summary
     assert confirmation["value"] is False
     assert training_config_visibility["visible"] is True
     assert list((tmp_path / "registry").glob("*.json"))
@@ -148,7 +148,7 @@ def test_training_is_blocked_until_a_dataset_has_been_inspected() -> None:
         )
     )
 
-    assert result[0].startswith("错误：请先导入并检查数据集")
+    assert result[0].startswith("错误：请先导入数据集")
 
 
 def test_blocking_inspection_error_prevents_training(
